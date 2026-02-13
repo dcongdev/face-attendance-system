@@ -1,6 +1,9 @@
+from gui.app import AttendanceApp
+
+
 def main():
-    print("Face Recognition Attendance System")
-    print("Python environment is ready!")
+    app = AttendanceApp()
+    app.mainloop()
 
 
 if __name__ == "__main__":

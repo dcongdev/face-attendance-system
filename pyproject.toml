@@ -2,4 +2,9 @@
 name = "face-attendance-system"
 version = "0.1.0"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "deepface>=0.0.102",
+    "numpy>=2.4.6",
+    "opencv-python>=5.0.0.93",
+    "tf-keras>=2.21.0",
+]
