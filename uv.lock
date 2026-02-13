@@ -276,6 +276,7 @@ dependencies = [
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "numpy", version = "2.5.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "opencv-python" },
+    { name = "pillow" },
     { name = "tf-keras" },
 ]
 
@@ -284,6 +285,7 @@ requires-dist = [
     { name = "deepface", specifier = ">=0.0.102" },
     { name = "numpy", specifier = ">=2.4.6" },
     { name = "opencv-python", specifier = ">=5.0.0.93" },
+    { name = "pillow", specifier = ">=12.3.0" },
     { name = "tf-keras", specifier = ">=2.21.0" },
 ]
 
