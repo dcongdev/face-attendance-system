@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Virtual environment
+.venv/
+venv/
+
+# Environment variables
+.env
+.env.*
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local data
+data/
+*.db
+*.sqlite
+*.sqlite3
+
+# Models and generated files
+*.h5
+*.keras
+*.onnx
