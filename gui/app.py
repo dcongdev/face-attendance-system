@@ -6,6 +6,7 @@ import cv2
 from PIL import Image, ImageTk
 
 from gui.camera import CameraCapture
+from gui.window_state import load_geometry, save_geometry
 
 
 class AttendanceApp(tk.Tk):
@@ -13,7 +14,7 @@ class AttendanceApp(tk.Tk):
         super().__init__()
 
         self.title("Face Recognition Attendance System")
-        self.geometry("1000x650")
+        self.geometry(load_geometry(self))
         self.minsize(800, 550)
 
         self.camera = None
@@ -161,6 +162,8 @@ class AttendanceApp(tk.Tk):
         self.after(30, self._update_preview)
 
     def close(self):
+        if not self._closing:
+            save_geometry(self)
         self._closing = True
         if self.camera is None:
             self.destroy()

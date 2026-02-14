@@ -3,6 +3,8 @@ from threading import Event, Thread
 
 import cv2
 
+from core.face_detection import FaceDetector
+
 
 class CameraCapture:
     """Read frames off the GUI thread; the worker owns the camera handle."""
@@ -34,6 +36,7 @@ class CameraCapture:
         capture = None
         error = None
         try:
+            detector = FaceDetector()
             capture = cv2.VideoCapture(self.index)
             if not capture.isOpened():
                 raise RuntimeError("Cannot open webcam. Check connection and camera permissions.")
@@ -43,7 +46,9 @@ class CameraCapture:
                     break
                 if not success or frame is None or frame.size == 0:
                     raise RuntimeError("Cannot read webcam frames. Check the camera connection.")
-                self._publish("frame", frame)
+                frame = detector.draw_faces(frame)
+                if not self._stop.is_set():
+                    self._publish("frame", frame)
         except (cv2.error, RuntimeError) as exc:
             error = str(exc)
         finally:
