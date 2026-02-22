@@ -9,3 +9,4 @@ A Python-based desktop application for automated attendance management using fac
 - Real-time face detection with bounding boxes.
 - Webcam start/stop controls.
 - Persistent window position and size across sessions.
+- Face embedding extraction using pretrained FaceNet via DeepFace.
