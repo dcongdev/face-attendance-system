@@ -1,12 +1,14 @@
 import tkinter as tk
 from tkinter import ttk
-from queue import Empty
+from queue import Empty, Queue
+from threading import Thread
 
 import cv2
 from PIL import Image, ImageTk
 
 from gui.camera import CameraCapture
 from gui.window_state import load_geometry, save_geometry
+from core.face_embedding import extract_embedding
 
 
 class AttendanceApp(tk.Tk):
@@ -21,6 +23,9 @@ class AttendanceApp(tk.Tk):
         self._preview_image = None
         self._stopping = False
         self._closing = False
+        self._embedding_results = Queue()
+        self._embedding_busy = False
+        self._embedding_status = None
         self.create_widgets()
         self.protocol("WM_DELETE_WINDOW", self.close)
 
@@ -56,6 +61,10 @@ class AttendanceApp(tk.Tk):
             state="disabled",
         )
         self.stop_camera_button.pack(side="left")
+        self.extract_button = ttk.Button(
+            camera_controls, text="Extract Embedding", command=self.extract_embedding
+        )
+        self.extract_button.pack(side="left", padx=(10, 0))
 
         preview_frame = ttk.Frame(camera_frame)
         preview_frame.pack(fill="both", expand=True)
@@ -111,6 +120,7 @@ class AttendanceApp(tk.Tk):
         if self.camera is not None or self._closing:
             return
         self._stopping = False
+        self._embedding_status = None
         self.camera = CameraCapture()
         self.start_camera_button.configure(state="disabled")
         self.stop_camera_button.configure(state="normal")
@@ -122,6 +132,7 @@ class AttendanceApp(tk.Tk):
         if self.camera is None:
             return
         self._stopping = True
+        self._embedding_status = None
         self.camera.stop()
         self.stop_camera_button.configure(state="disabled")
         self.status_label.configure(text="Status: Stopping camera...")
@@ -156,10 +167,49 @@ class AttendanceApp(tk.Tk):
                                      max(1, self.camera_label.winfo_height())))
                     self._preview_image = ImageTk.PhotoImage(image)
                     self.camera_label.configure(image=self._preview_image, text="")
-                    self.status_label.configure(text="Status: Camera running")
+                    self.status_label.configure(
+                        text=self._embedding_status or "Status: Camera running"
+                    )
                 except (cv2.error, ValueError, tk.TclError):
                     self.stop_camera()
         self.after(30, self._update_preview)
+
+    def extract_embedding(self):
+        if self._embedding_busy or self._closing:
+            return
+        frame = self.camera.snapshot() if self.camera and not self._stopping else None
+        if frame is None:
+            self._embedding_status = "Status: No camera frame available. Start the camera first."
+            self.status_label.configure(text=self._embedding_status)
+            return
+        self._embedding_busy = True
+        self.extract_button.configure(state="disabled")
+        self._embedding_status = "Status: Extracting embedding (first run may take longer)..."
+        self.status_label.configure(text=self._embedding_status)
+        Thread(target=self._extract_in_background, args=(frame, self.camera), daemon=True).start()
+        self.after(50, self._poll_embedding)
+
+    def _extract_in_background(self, frame, camera):
+        try:
+            embedding = extract_embedding(frame)
+            message = f"Status: FaceNet embedding extracted: {embedding.size} dimensions"
+        except Exception as exc:
+            message = f"Status: Embedding error: {exc}"
+        self._embedding_results.put((camera, message))
+
+    def _poll_embedding(self):
+        if self._closing:
+            return
+        try:
+            camera, message = self._embedding_results.get_nowait()
+        except Empty:
+            self.after(50, self._poll_embedding)
+            return
+        self._embedding_busy = False
+        self.extract_button.configure(state="normal")
+        if camera is self.camera and not self._stopping:
+            self._embedding_status = message
+            self.status_label.configure(text=message)
 
     def close(self):
         if not self._closing:
