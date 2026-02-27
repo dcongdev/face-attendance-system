@@ -9,6 +9,7 @@ from PIL import Image, ImageTk
 from gui.camera import CameraCapture
 from gui.window_state import load_geometry, save_geometry
 from core.face_embedding import extract_embedding
+from core.registration import RegistrationResult, register_student
 
 
 class AttendanceApp(tk.Tk):
@@ -26,6 +27,8 @@ class AttendanceApp(tk.Tk):
         self._embedding_results = Queue()
         self._embedding_busy = False
         self._embedding_status = None
+        self._registration_results = Queue()
+        self._registration_busy = False
         self.create_widgets()
         self.protocol("WM_DELETE_WINDOW", self.close)
 
@@ -93,10 +96,12 @@ class AttendanceApp(tk.Tk):
         self.student_name_entry = ttk.Entry(control_frame, width=30)
         self.student_name_entry.pack(pady=(5, 20))
 
-        ttk.Button(
+        self.register_button = ttk.Button(
             control_frame,
             text="Register Student",
-        ).pack(fill="x", pady=5)
+            command=self.register_student,
+        )
+        self.register_button.pack(fill="x", pady=5)
 
         ttk.Button(
             control_frame,
@@ -152,7 +157,8 @@ class AttendanceApp(tk.Tk):
                 self.camera = None
                 self._clear_preview()
                 if self._closing:
-                    self.destroy()
+                    if not self._registration_busy:
+                        self.destroy()
                     return
                 self.start_camera_button.configure(state="normal")
                 self.stop_camera_button.configure(state="disabled")
@@ -175,7 +181,7 @@ class AttendanceApp(tk.Tk):
         self.after(30, self._update_preview)
 
     def extract_embedding(self):
-        if self._embedding_busy or self._closing:
+        if self._embedding_busy or self._registration_busy or self._closing:
             return
         frame = self.camera.snapshot() if self.camera and not self._stopping else None
         if frame is None:
@@ -184,6 +190,7 @@ class AttendanceApp(tk.Tk):
             return
         self._embedding_busy = True
         self.extract_button.configure(state="disabled")
+        self.register_button.configure(state="disabled")
         self._embedding_status = "Status: Extracting embedding (first run may take longer)..."
         self.status_label.configure(text=self._embedding_status)
         Thread(target=self._extract_in_background, args=(frame, self.camera), daemon=True).start()
@@ -207,16 +214,70 @@ class AttendanceApp(tk.Tk):
             return
         self._embedding_busy = False
         self.extract_button.configure(state="normal")
+        self.register_button.configure(state="normal")
         if camera is self.camera and not self._stopping:
             self._embedding_status = message
             self.status_label.configure(text=message)
+
+    def register_student(self):
+        if self._registration_busy or self._embedding_busy or self._closing:
+            return
+        student_id = self.student_id_entry.get().strip()
+        full_name = self.student_name_entry.get().strip()
+        if not student_id or student_id == "Unknown":
+            self._show_registration_status("Enter a student ID other than 'Unknown'.")
+            return
+        if not full_name:
+            self._show_registration_status("Enter the student's full name.")
+            return
+        frame = self.camera.snapshot() if self.camera and not self._stopping else None
+        if frame is None:
+            self._show_registration_status("No camera frame available. Start the camera first.")
+            return
+        self._registration_busy = True
+        self.register_button.configure(state="disabled")
+        self.extract_button.configure(state="disabled")
+        self.student_id_entry.configure(state="disabled")
+        self.student_name_entry.configure(state="disabled")
+        self._show_registration_status(f"Registering {student_id!r} (first run may take longer)...")
+        Thread(target=self._register_in_background,
+               args=(student_id, full_name, frame), daemon=True).start()
+        self.after(50, self._poll_registration)
+
+    def _show_registration_status(self, message):
+        self._embedding_status = f"Status: {message}"
+        self.status_label.configure(text=self._embedding_status)
+
+    def _register_in_background(self, student_id, full_name, frame):
+        try:
+            result = register_student(student_id, full_name, frame)
+        except Exception as exc:
+            result = RegistrationResult(False, "registration_error", f"Registration failed: {exc}")
+        self._registration_results.put(result)
+
+    def _poll_registration(self):
+        try:
+            result = self._registration_results.get_nowait()
+        except Empty:
+            self.after(50, self._poll_registration)
+            return
+        self._registration_busy = False
+        if self._closing:
+            if self.camera is None:
+                self.destroy()
+            return
+        self.register_button.configure(state="normal")
+        self.extract_button.configure(state="normal")
+        self.student_id_entry.configure(state="normal")
+        self.student_name_entry.configure(state="normal")
+        self._show_registration_status(result.message)
 
     def close(self):
         if not self._closing:
             save_geometry(self)
         self._closing = True
-        if self.camera is None:
+        if self.camera is None and not self._registration_busy:
             self.destroy()
-        else:
+        elif self.camera is not None:
             # Wait via after() for the worker to release its handle, without joining Tk.
             self.stop_camera()
