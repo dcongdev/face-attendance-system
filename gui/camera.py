@@ -1,9 +1,13 @@
 from queue import Empty, Full, Queue
 from threading import Event, Lock, Thread
+from time import monotonic
 
 import cv2
+import numpy as np
+from PIL import Image, ImageDraw, ImageFont
 
 from core.face_detection import FaceDetector
+from core.live_recognition import LABEL_MAX_AGE, label_for_box
 
 
 class CameraCapture:
@@ -15,6 +19,7 @@ class CameraCapture:
         self._stop = Event()
         self._frame_lock = Lock()
         self._latest_frame = None
+        self._recognition = (0, [])
         self._thread = Thread(target=self._run, daemon=True)
 
     def start(self):
@@ -29,6 +34,10 @@ class CameraCapture:
             if self._stop.is_set() or self._latest_frame is None:
                 return None
             return self._latest_frame.copy()
+
+    def set_recognition(self, results, captured_at):
+        with self._frame_lock:
+            self._recognition = (captured_at, results)
 
     def _publish(self, kind, value):
         # Keep only the latest frame so a slow preview cannot build a backlog.
@@ -46,6 +55,10 @@ class CameraCapture:
         error = None
         try:
             detector = FaceDetector()
+            try:
+                font = ImageFont.truetype("arial.ttf", 18)
+            except OSError:
+                font = ImageFont.load_default()
             capture = cv2.VideoCapture(self.index)
             if not capture.isOpened():
                 raise RuntimeError("Cannot open webcam. Check connection and camera permissions.")
@@ -57,7 +70,22 @@ class CameraCapture:
                     raise RuntimeError("Cannot read webcam frames. Check the camera connection.")
                 with self._frame_lock:
                     self._latest_frame = frame.copy()
-                frame = detector.draw_faces(frame)
+                    captured_at, results = self._recognition
+                if monotonic() - captured_at > LABEL_MAX_AGE:
+                    results = []
+                labels = []
+                for box in detector.detect_faces(frame):
+                    x, y, width, height = box
+                    label = label_for_box(box, results)
+                    cv2.rectangle(frame, (x, y), (x + width - 1, y + height - 1), (0, 255, 0), 2)
+                    labels.append(((x, max(0, y - 24)), label))
+                if labels:
+                    image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                    draw = ImageDraw.Draw(image)
+                    for position, label in labels:
+                        draw.text(position, label, font=font, fill=(0, 255, 0),
+                                  stroke_width=1, stroke_fill=(0, 0, 0))
+                    frame = cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR)
                 if not self._stop.is_set():
                     self._publish("frame", frame)
         except (cv2.error, RuntimeError) as exc:

@@ -2,6 +2,7 @@ import tkinter as tk
 from tkinter import ttk
 from queue import Empty, Queue
 from threading import Thread
+from time import monotonic
 
 import cv2
 from PIL import Image, ImageTk
@@ -10,6 +11,7 @@ from gui.camera import CameraCapture
 from gui.window_state import load_geometry, save_geometry
 from core.face_embedding import extract_embedding
 from core.registration import RegistrationResult, register_student
+from core.live_recognition import RECOGNITION_INTERVAL, recognize_frame
 
 
 class AttendanceApp(tk.Tk):
@@ -29,6 +31,10 @@ class AttendanceApp(tk.Tk):
         self._embedding_status = None
         self._registration_results = Queue()
         self._registration_busy = False
+        self._recognition_busy = False
+        self._recognition_results = Queue()
+        self._next_recognition = 0
+        self._recognition_status = None
         self.create_widgets()
         self.protocol("WM_DELETE_WINDOW", self.close)
 
@@ -126,6 +132,7 @@ class AttendanceApp(tk.Tk):
             return
         self._stopping = False
         self._embedding_status = None
+        self._recognition_status = None
         self.camera = CameraCapture()
         self.start_camera_button.configure(state="disabled")
         self.stop_camera_button.configure(state="normal")
@@ -174,11 +181,46 @@ class AttendanceApp(tk.Tk):
                     self._preview_image = ImageTk.PhotoImage(image)
                     self.camera_label.configure(image=self._preview_image, text="")
                     self.status_label.configure(
-                        text=self._embedding_status or "Status: Camera running"
+                        text=self._embedding_status or self._recognition_status or "Status: Camera running"
                     )
+                    self._maybe_recognize()
                 except (cv2.error, ValueError, tk.TclError):
                     self.stop_camera()
         self.after(30, self._update_preview)
+
+    def _maybe_recognize(self):
+        if (self._recognition_busy or self._registration_busy or self._embedding_busy
+                or self._closing or self._stopping or monotonic() < self._next_recognition):
+            return
+        frame = self.camera.snapshot()
+        if frame is None:
+            return
+        self._recognition_busy = True
+        captured_at = monotonic()
+        Thread(target=self._recognize_in_background,
+               args=(frame, self.camera, captured_at), daemon=True).start()
+        self.after(50, self._poll_recognition)
+
+    def _recognize_in_background(self, frame, camera, captured_at):
+        try:
+            results, message = recognize_frame(frame)
+        except Exception as exc:
+            results, message = [], f"Recognition error: {exc}"
+        self._recognition_results.put((camera, captured_at, results, message))
+
+    def _poll_recognition(self):
+        if self._closing:
+            return
+        try:
+            camera, captured_at, results, message = self._recognition_results.get_nowait()
+        except Empty:
+            self.after(50, self._poll_recognition)
+            return
+        self._recognition_busy = False
+        self._next_recognition = monotonic() + RECOGNITION_INTERVAL
+        if camera is self.camera and not self._stopping:
+            camera.set_recognition(results, captured_at)
+            self._recognition_status = f"Status: {message}"
 
     def extract_embedding(self):
         if self._embedding_busy or self._registration_busy or self._closing:

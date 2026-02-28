@@ -1,8 +1,17 @@
 import numpy as np
+from threading import Lock
+
+
+_INFERENCE_LOCK = Lock()
 
 
 def extract_embedding(frame):
     """Return a FaceNet embedding only when exactly one face is detected in a BGR frame."""
+    with _INFERENCE_LOCK:
+        return _extract_embedding(frame)
+
+
+def _extract_embedding(frame):
     if frame is None or frame.size == 0:
         raise ValueError("No camera frame available. Start the camera and try again.")
 

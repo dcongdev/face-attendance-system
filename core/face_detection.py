@@ -12,8 +12,8 @@ class FaceDetector:
         if self._cascade.empty():
             raise RuntimeError("Cannot load the OpenCV face detector.")
 
-    def draw_faces(self, frame):
-        """Draw boxes in place and return the BGR frame, including when no face is found."""
+    def detect_faces(self, frame):
+        """Return (x, y, width, height) boxes in original-frame coordinates."""
         height, width = frame.shape[:2]
         # Bound detection cost independently of the camera's capture resolution.
         scale = min(1.0, 640 / width)
@@ -29,11 +29,16 @@ class FaceDetector:
         )
         scale_x = width / gray.shape[1]
         scale_y = height / gray.shape[0]
+        boxes = []
         for x, y, w, h in faces:
-            top_left = (round(x * scale_x), round(y * scale_y))
-            bottom_right = (
-                min(width - 1, round((x + w) * scale_x)),
-                min(height - 1, round((y + h) * scale_y)),
-            )
-            cv2.rectangle(frame, top_left, bottom_right, (0, 255, 0), 2)
+            left, top = round(x * scale_x), round(y * scale_y)
+            right = min(width, round((x + w) * scale_x))
+            bottom = min(height, round((y + h) * scale_y))
+            boxes.append((left, top, right - left, bottom - top))
+        return boxes
+
+    def draw_faces(self, frame):
+        """Draw boxes in place and return the BGR frame."""
+        for x, y, w, h in self.detect_faces(frame):
+            cv2.rectangle(frame, (x, y), (x + w - 1, y + h - 1), (0, 255, 0), 2)
         return frame

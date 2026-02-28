@@ -122,7 +122,11 @@ def get_student(student_id, db_path=DEFAULT_DB_PATH):
 
 def load_registered_students(db_path=DEFAULT_DB_PATH):
     """Return {student_id: float32_embedding} for the independent matching helper."""
+    return {student.student_id: student.embedding for student in list_students(db_path)}
+
+
+def list_students(db_path=DEFAULT_DB_PATH):
+    """Load student records and embeddings together from one database snapshot."""
     with _connection(db_path) as connection:
         rows = connection.execute("SELECT * FROM students ORDER BY student_id").fetchall()
-    students = [_restore(row) for row in rows]
-    return {student.student_id: student.embedding for student in students}
+    return [_restore(row) for row in rows]
