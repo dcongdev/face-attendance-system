@@ -1,6 +1,6 @@
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import sqlite3
@@ -9,6 +9,7 @@ import numpy as np
 
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parents[1] / "data" / "attendance.sqlite3"
+ATTENDANCE_TIMEZONE = timezone(timedelta(hours=7), name="Asia/Saigon")
 
 
 class DatabaseError(Exception):
@@ -19,12 +20,24 @@ class DuplicateStudentError(DatabaseError):
     """The student ID is already registered."""
 
 
+class StudentNotFoundError(DatabaseError):
+    """Attendance requires an existing registered student."""
+
+
 @dataclass
 class Student:
     student_id: str
     full_name: str
     embedding: np.ndarray
     registered_at: str
+
+
+@dataclass(frozen=True)
+class AttendanceRecord:
+    student_id: str
+    full_name: str
+    attendance_date: str
+    checked_in_at: str
 
 
 @contextmanager
@@ -36,6 +49,7 @@ def _connection(db_path, *, create=False):
             path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(path.as_uri() + ("?mode=rwc" if create else "?mode=rw"), uri=True)
         connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
         with connection:
             yield connection
     except (sqlite3.Error, OSError) as exc:
@@ -46,7 +60,7 @@ def _connection(db_path, *, create=False):
 
 
 def initialize_database(db_path=DEFAULT_DB_PATH):
-    """Create local storage and the students table, safely on repeated calls."""
+    """Create local storage and student/attendance tables, safely on repeated calls."""
     with _connection(db_path, create=True) as connection:
         connection.execute("""
             CREATE TABLE IF NOT EXISTS students (
@@ -54,6 +68,14 @@ def initialize_database(db_path=DEFAULT_DB_PATH):
                 full_name TEXT NOT NULL,
                 embedding TEXT NOT NULL,
                 registered_at TEXT NOT NULL
+            )
+        """)
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS attendance (
+                student_id TEXT NOT NULL REFERENCES students(student_id),
+                attendance_date TEXT NOT NULL,
+                checked_in_at TEXT NOT NULL,
+                PRIMARY KEY (student_id, attendance_date)
             )
         """)
 
@@ -130,3 +152,61 @@ def list_students(db_path=DEFAULT_DB_PATH):
     with _connection(db_path) as connection:
         rows = connection.execute("SELECT * FROM students ORDER BY student_id").fetchall()
     return [_restore(row) for row in rows]
+
+
+def _attendance_time(now):
+    if now is None:
+        now = datetime.now(timezone.utc)
+    if not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("Check-in time must be a timezone-aware datetime.")
+    return (now.astimezone(ATTENDANCE_TIMEZONE).date().isoformat(),
+            now.astimezone(timezone.utc).isoformat())
+
+
+def _require_student(connection, student_id):
+    if connection.execute("SELECT 1 FROM students WHERE student_id = ?", (student_id,)).fetchone() is None:
+        raise StudentNotFoundError(f"Student ID {student_id!r} is not registered.")
+
+
+def record_attendance(student_id, db_path=DEFAULT_DB_PATH, *, now=None):
+    """Return True for a new check-in, False for an existing check-in that day.
+
+    Days use Asia/Saigon (UTC+07); timestamps are stored as UTC ISO 8601 strings.
+    Optional aware `now` permits deterministic callers/tests. Duplicate check-ins
+    retain the original timestamp. Raise ValueError for malformed IDs/times,
+    StudentNotFoundError for absent students, or DatabaseError on storage failure.
+    Call initialize_database before using attendance functions.
+    """
+    student_id = _student_id(student_id)
+    attendance_date, checked_in_at = _attendance_time(now)
+    with _connection(db_path) as connection:
+        _require_student(connection, student_id)
+        cursor = connection.execute("""
+            INSERT INTO attendance (student_id, attendance_date, checked_in_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(student_id, attendance_date) DO NOTHING
+        """, (student_id, attendance_date, checked_in_at))
+        return cursor.rowcount == 1
+
+
+def has_checked_in_today(student_id, db_path=DEFAULT_DB_PATH, *, now=None):
+    """Check the Asia/Saigon calendar day; invalid/missing IDs follow record_attendance."""
+    student_id = _student_id(student_id)
+    attendance_date, _ = _attendance_time(now)
+    with _connection(db_path) as connection:
+        _require_student(connection, student_id)
+        return connection.execute(
+            "SELECT 1 FROM attendance WHERE student_id = ? AND attendance_date = ?",
+            (student_id, attendance_date),
+        ).fetchone() is not None
+
+
+def get_attendance_history(db_path=DEFAULT_DB_PATH):
+    """Return attendance with student names, newest first; ties sort by student ID."""
+    with _connection(db_path) as connection:
+        rows = connection.execute("""
+            SELECT a.student_id, s.full_name, a.attendance_date, a.checked_in_at
+            FROM attendance AS a JOIN students AS s ON s.student_id = a.student_id
+            ORDER BY a.checked_in_at DESC, a.student_id ASC
+        """).fetchall()
+    return [AttendanceRecord(**dict(row)) for row in rows]
