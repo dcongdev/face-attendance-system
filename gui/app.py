@@ -35,6 +35,8 @@ class AttendanceApp(tk.Tk):
         self._recognition_results = Queue()
         self._next_recognition = 0
         self._recognition_status = None
+        self._attendance_active = False
+        self._recognition_session = 0
         self.create_widgets()
         self.protocol("WM_DELETE_WINDOW", self.close)
 
@@ -109,15 +111,20 @@ class AttendanceApp(tk.Tk):
         )
         self.register_button.pack(fill="x", pady=5)
 
-        ttk.Button(
+        self.start_attendance_button = ttk.Button(
             control_frame,
             text="Start Attendance",
-        ).pack(fill="x", pady=5)
+            command=self.start_attendance,
+        )
+        self.start_attendance_button.pack(fill="x", pady=5)
 
-        ttk.Button(
+        self.stop_attendance_button = ttk.Button(
             control_frame,
             text="Stop Attendance",
-        ).pack(fill="x", pady=5)
+            command=self.stop_attendance,
+            state="disabled",
+        )
+        self.stop_attendance_button.pack(fill="x", pady=5)
 
         # Status bar
         self.status_label = ttk.Label(
@@ -143,6 +150,7 @@ class AttendanceApp(tk.Tk):
     def stop_camera(self):
         if self.camera is None:
             return
+        self.stop_attendance()
         self._stopping = True
         self._embedding_status = None
         self.camera.stop()
@@ -161,6 +169,7 @@ class AttendanceApp(tk.Tk):
             pass
         else:
             if kind == "stopped":
+                self.stop_attendance()
                 self.camera = None
                 self._clear_preview()
                 if self._closing:
@@ -188,8 +197,35 @@ class AttendanceApp(tk.Tk):
                     self.stop_camera()
         self.after(30, self._update_preview)
 
+    def start_attendance(self):
+        if self._closing or (self.camera is not None and self._stopping) or self._attendance_active:
+            return
+        if self.camera is None:
+            self.start_camera()
+        self._attendance_active = True
+        self._recognition_session += 1
+        self._next_recognition = 0
+        self.camera.enable_recognition(True)
+        self.start_attendance_button.configure(state="disabled")
+        self.stop_attendance_button.configure(state="normal")
+        self._embedding_status = None
+        self._recognition_status = "Status: Attendance recognition active (no logging)"
+        self.status_label.configure(text=self._recognition_status)
+
+    def stop_attendance(self):
+        self._attendance_active = False
+        self._recognition_session += 1
+        if self.camera is not None:
+            self.camera.enable_recognition(False)
+        self.start_attendance_button.configure(state="normal")
+        self.stop_attendance_button.configure(state="disabled")
+        self._embedding_status = None
+        self._recognition_status = None
+        self.status_label.configure(text="Status: Attendance recognition stopped; camera preview only")
+
     def _maybe_recognize(self):
-        if (self._recognition_busy or self._registration_busy or self._embedding_busy
+        if (not self._attendance_active or self.camera is None
+                or self._recognition_busy or self._registration_busy or self._embedding_busy
                 or self._closing or self._stopping or monotonic() < self._next_recognition):
             return
         frame = self.camera.snapshot()
@@ -198,27 +234,28 @@ class AttendanceApp(tk.Tk):
         self._recognition_busy = True
         captured_at = monotonic()
         Thread(target=self._recognize_in_background,
-               args=(frame, self.camera, captured_at), daemon=True).start()
+               args=(frame, self.camera, captured_at, self._recognition_session), daemon=True).start()
         self.after(50, self._poll_recognition)
 
-    def _recognize_in_background(self, frame, camera, captured_at):
+    def _recognize_in_background(self, frame, camera, captured_at, session):
         try:
             results, message = recognize_frame(frame)
         except Exception as exc:
             results, message = [], f"Recognition error: {exc}"
-        self._recognition_results.put((camera, captured_at, results, message))
+        self._recognition_results.put((camera, captured_at, session, results, message))
 
     def _poll_recognition(self):
         if self._closing:
             return
         try:
-            camera, captured_at, results, message = self._recognition_results.get_nowait()
+            camera, captured_at, session, results, message = self._recognition_results.get_nowait()
         except Empty:
             self.after(50, self._poll_recognition)
             return
         self._recognition_busy = False
         self._next_recognition = monotonic() + RECOGNITION_INTERVAL
-        if camera is self.camera and not self._stopping:
+        if (camera is self.camera and not self._stopping and self._attendance_active
+                and session == self._recognition_session):
             camera.set_recognition(results, captured_at)
             self._recognition_status = f"Status: {message}"
 

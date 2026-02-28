@@ -85,6 +85,7 @@ class LiveRecognitionGuiTests(unittest.TestCase):
         self.camera.snapshot.return_value = np.zeros((160, 160, 3), dtype=np.uint8)
         self.camera.messages = Queue()
         self.app.camera = self.camera
+        self.app.start_attendance()
 
     def cleanup(self):
         for callback in self.app.tk.call('after', 'info'):
@@ -131,7 +132,7 @@ class LiveRecognitionGuiTests(unittest.TestCase):
 
     def test_stopped_or_replaced_camera_does_not_receive_old_results(self):
         self.app._recognition_busy = True
-        self.app._recognition_results.put((self.camera, time.monotonic(), [], 'Old result'))
+        self.app._recognition_results.put((self.camera, time.monotonic(), self.app._recognition_session, [], 'Old result'))
         self.app.camera = Mock()
         self.app._poll_recognition()
         self.camera.set_recognition.assert_not_called()
@@ -144,3 +145,28 @@ class LiveRecognitionGuiTests(unittest.TestCase):
         self.assertIn('Database locked', self.app._recognition_status)
         self.assertIs(self.app.camera, self.camera)
         self.camera.set_recognition.assert_called_once()
+
+    def test_camera_only_mode_never_schedules_recognition(self):
+        self.app.stop_attendance()
+        with patch('gui.app.recognize_frame') as recognize_mock:
+            self.app._maybe_recognize()
+            recognize_mock.assert_not_called()
+        self.camera.stop.assert_not_called()
+        self.camera.enable_recognition.assert_called_with(False)
+
+    def test_stop_restart_discards_inflight_results(self):
+        session = self.app._recognition_session
+        self.app._recognition_busy = True
+        self.app.stop_attendance()
+        self.app.start_attendance()
+        self.app._recognition_results.put((self.camera, time.monotonic(), session, [], 'Old result'))
+        self.app._poll_recognition()
+        self.camera.set_recognition.assert_not_called()
+        self.assertTrue(self.app._attendance_active)
+        self.camera.stop.assert_not_called()
+
+    def test_stopping_camera_disables_attendance(self):
+        self.app.stop_camera()
+        self.assertFalse(self.app._attendance_active)
+        self.camera.enable_recognition.assert_called_with(False)
+        self.camera.stop.assert_called_once()

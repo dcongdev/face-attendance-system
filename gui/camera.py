@@ -20,6 +20,7 @@ class CameraCapture:
         self._frame_lock = Lock()
         self._latest_frame = None
         self._recognition = (0, [])
+        self._recognition_enabled = False
         self._thread = Thread(target=self._run, daemon=True)
 
     def start(self):
@@ -37,7 +38,13 @@ class CameraCapture:
 
     def set_recognition(self, results, captured_at):
         with self._frame_lock:
-            self._recognition = (captured_at, results)
+            if self._recognition_enabled:
+                self._recognition = (captured_at, results)
+
+    def enable_recognition(self, enabled):
+        with self._frame_lock:
+            self._recognition_enabled = enabled
+            self._recognition = (0, [])
 
     def _publish(self, kind, value):
         # Keep only the latest frame so a slow preview cannot build a backlog.
@@ -71,6 +78,7 @@ class CameraCapture:
                 with self._frame_lock:
                     self._latest_frame = frame.copy()
                     captured_at, results = self._recognition
+                    recognition_enabled = self._recognition_enabled
                 if monotonic() - captured_at > LABEL_MAX_AGE:
                     results = []
                 labels = []
@@ -78,7 +86,8 @@ class CameraCapture:
                     x, y, width, height = box
                     label = label_for_box(box, results)
                     cv2.rectangle(frame, (x, y), (x + width - 1, y + height - 1), (0, 255, 0), 2)
-                    labels.append(((x, max(0, y - 24)), label))
+                    if recognition_enabled:
+                        labels.append(((x, max(0, y - 24)), label))
                 if labels:
                     image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
                     draw = ImageDraw.Draw(image)
