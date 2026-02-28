@@ -10,3 +10,6 @@ A Python-based desktop application for automated attendance management using fac
 - Webcam start/stop controls.
 - Persistent window position and size across sessions.
 - Face embedding extraction using pretrained FaceNet via DeepFace.
+- Student registration with SQLite storage.
+- Face recognition using cosine similarity.
+- Real-time student identification with name/ID display.
