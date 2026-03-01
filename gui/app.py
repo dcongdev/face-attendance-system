@@ -13,6 +13,7 @@ from core.face_embedding import extract_embedding
 from core.registration import RegistrationResult, register_student
 from core.live_recognition import RECOGNITION_INTERVAL, recognize_frame
 from core.attendance import AttendanceSession
+from gui.attendance_history import AttendanceHistoryWindow
 
 
 class AttendanceApp(tk.Tk):
@@ -42,6 +43,7 @@ class AttendanceApp(tk.Tk):
         self._checkin_busy = False
         self._checkin_results = Queue()
         self._attendance_status = None
+        self._history_window = None
         self.create_widgets()
         self.protocol("WM_DELETE_WINDOW", self.close)
 
@@ -130,6 +132,9 @@ class AttendanceApp(tk.Tk):
             state="disabled",
         )
         self.stop_attendance_button.pack(fill="x", pady=5)
+        ttk.Button(
+            control_frame, text="Attendance History", command=self.open_attendance_history,
+        ).pack(fill="x", pady=(15, 5))
 
         # Status bar
         self.status_label = ttk.Label(
@@ -138,6 +143,15 @@ class AttendanceApp(tk.Tk):
             padding=10,
         )
         self.status_label.pack(side="bottom", fill="x")
+
+    def open_attendance_history(self):
+        if self._closing:
+            return
+        if self._history_window is None or not self._history_window.winfo_exists():
+            self._history_window = AttendanceHistoryWindow(self)
+        else:
+            self._history_window.deiconify()
+            self._history_window.lift()
 
     def start_camera(self):
         if self.camera is not None or self._closing:
