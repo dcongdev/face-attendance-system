@@ -168,7 +168,7 @@ def _require_student(connection, student_id):
         raise StudentNotFoundError(f"Student ID {student_id!r} is not registered.")
 
 
-def record_attendance(student_id, db_path=DEFAULT_DB_PATH, *, now=None):
+def record_attendance(student_id, db_path=DEFAULT_DB_PATH, *, now=None, cancel_event=None):
     """Return True for a new check-in, False for an existing check-in that day.
 
     Days use Asia/Saigon (UTC+07); timestamps are stored as UTC ISO 8601 strings.
@@ -176,16 +176,26 @@ def record_attendance(student_id, db_path=DEFAULT_DB_PATH, *, now=None):
     retain the original timestamp. Raise ValueError for malformed IDs/times,
     StudentNotFoundError for absent students, or DatabaseError on storage failure.
     Call initialize_database before using attendance functions.
+    Optional cancel_event cancels a queued/in-progress write before commit,
+    returning None. An already committed check-in is retained.
     """
     student_id = _student_id(student_id)
     attendance_date, checked_in_at = _attendance_time(now)
     with _connection(db_path) as connection:
+        # Acquire the SQLite write lock before checking cancellation: a write
+        # that waited for another connection must not proceed after Stop.
+        connection.execute("BEGIN IMMEDIATE")
+        if cancel_event is not None and cancel_event.is_set():
+            return None
         _require_student(connection, student_id)
         cursor = connection.execute("""
             INSERT INTO attendance (student_id, attendance_date, checked_in_at)
             VALUES (?, ?, ?)
             ON CONFLICT(student_id, attendance_date) DO NOTHING
         """, (student_id, attendance_date, checked_in_at))
+        if cancel_event is not None and cancel_event.is_set():
+            connection.rollback()
+            return None
         return cursor.rowcount == 1
 
 

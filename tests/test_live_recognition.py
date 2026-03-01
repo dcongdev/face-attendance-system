@@ -36,6 +36,7 @@ class LiveRecognitionTests(unittest.TestCase):
         with patch('core.live_recognition.extract_embedding', side_effect=[self.embedding, -self.embedding]):
             results, message = self.recognize()
         self.assertEqual([r.label for r in results], ['Nguyễn An (S01)', 'Unknown'])
+        self.assertEqual([r.student_id for r in results], ['S01', None])
         self.assertIn('running', message)
 
     def test_empty_database_skips_facenet(self):
@@ -170,3 +171,55 @@ class LiveRecognitionGuiTests(unittest.TestCase):
         self.assertFalse(self.app._attendance_active)
         self.camera.enable_recognition.assert_called_with(False)
         self.camera.stop.assert_called_once()
+
+    def test_checkins_run_in_background_and_status_persists(self):
+        release = Event()
+        session = Mock()
+        self.app._attendance_session = session
+
+        def check_in(faces):
+            release.wait(3)
+            return ['Checked in: An (S01)']
+
+        session.check_in.side_effect = check_in
+        faces = [RecognizedFace((0,0,10,10), 'An (S01)', 'S01')]
+        self.app._recognition_results.put((self.camera, time.monotonic(), self.app._recognition_session,
+                                           faces, 'Live recognition running'))
+        try:
+            self.app._poll_recognition()
+            ticks = []
+            self.app.after(10, lambda: ticks.append(True))
+            self.pump(lambda: bool(ticks) and session.check_in.called)
+            self.assertTrue(self.app._checkin_busy)
+        finally:
+            release.set()
+            self.pump(lambda: not self.app._checkin_busy)
+        self.assertIn('Checked in: An (S01)', self.app.status_label.cget('text'))
+        self.app._recognition_results.put((self.camera, time.monotonic(), self.app._recognition_session,
+                                           [], 'Live recognition running'))
+        session.check_in.side_effect = None
+        session.check_in.return_value = []
+        self.app._poll_recognition()
+        self.pump(lambda: not self.app._checkin_busy)
+        self.assertIn('Checked in: An (S01)', self.app._attendance_status)
+
+    def test_stop_drops_recognition_before_it_can_schedule_checkin(self):
+        session = Mock()
+        self.app._attendance_session = session
+        generation = self.app._recognition_session
+        self.app.stop_attendance()
+        self.app._recognition_results.put((self.camera, time.monotonic(), generation,
+                                           [RecognizedFace((0,0,1,1), 'An', 'S01')], 'Recognized'))
+        self.app._poll_recognition()
+        session.stop.assert_called_once()
+        session.check_in.assert_not_called()
+        self.camera.stop.assert_not_called()
+
+    def test_late_checkin_feedback_is_not_shown_after_stop(self):
+        session = self.app._attendance_session
+        self.app.stop_attendance()
+        self.app._checkin_results.put((session, ['Checked in: old session']))
+        self.app._checkin_busy = True
+        self.app._poll_checkins()
+        self.assertNotIn('old session', self.app.status_label.cget('text'))
+        self.assertFalse(self.app._checkin_busy)

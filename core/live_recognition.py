@@ -16,6 +16,7 @@ LABEL_MAX_AGE = 2.0
 class RecognizedFace:
     box: tuple
     label: str
+    student_id: str | None = None
 
 
 def recognize_frame(frame, *, threshold=RECOGNITION_THRESHOLD, db_path=DEFAULT_DB_PATH):
@@ -35,14 +36,16 @@ def recognize_frame(frame, *, threshold=RECOGNITION_THRESHOLD, db_path=DEFAULT_D
     for box in boxes:
         x, y, width, height = box
         label = "Unknown"
+        matched_id = None
         try:
             embedding = extract_embedding(frame[y:y + height, x:x + width].copy())
             student_id, score = match_embedding(embedding, known, threshold=threshold)
             if student_id != "Unknown":
+                matched_id = student_id
                 label = f"{names[student_id]} ({student_id})"
         except Exception:
             errors += 1
-        results.append(RecognizedFace(box, label))
+        results.append(RecognizedFace(box, label, matched_id))
     message = f"Recognition failed for {errors} face(s); showing Unknown." if errors else "Live recognition running"
     return results, message
 
