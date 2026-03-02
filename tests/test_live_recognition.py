@@ -89,6 +89,7 @@ class LiveRecognitionGuiTests(unittest.TestCase):
         self.app.start_attendance()
 
     def cleanup(self):
+        self.app.status.cancel_timers()
         for callback in self.app.tk.call('after', 'info'):
             self.app.after_cancel(callback)
         self.app.destroy()
@@ -122,12 +123,9 @@ class LiveRecognitionGuiTests(unittest.TestCase):
             self.assertEqual(recognize_mock.call_count, 1)
             self.camera.set_recognition.assert_called_once()
 
-    def test_registration_and_extraction_pause_new_recognition(self):
+    def test_registration_pauses_new_recognition(self):
         with patch('gui.app.recognize_frame') as recognize_mock:
             self.app._registration_busy = True
-            self.app._maybe_recognize()
-            self.app._registration_busy = False
-            self.app._embedding_busy = True
             self.app._maybe_recognize()
             recognize_mock.assert_not_called()
 
@@ -223,3 +221,36 @@ class LiveRecognitionGuiTests(unittest.TestCase):
         self.app._poll_checkins()
         self.assertNotIn('old session', self.app.status_label.cget('text'))
         self.assertFalse(self.app._checkin_busy)
+
+    def test_recognized_is_distinct_from_checkin_and_duplicate_status(self):
+        session = Mock()
+        session.check_in.return_value = []
+        self.app._attendance_session = session
+        face = RecognizedFace((0,0,10,10), 'An (S01)', 'S01')
+        self.app._recognition_results.put((self.camera, time.monotonic(), self.app._recognition_session,
+                                           [face], 'Live recognition running'))
+        self.app._poll_recognition()
+        self.assertEqual(self.app.status.state, 'recognized')
+        self.assertIn('Recognized:', self.app.status_label.cget('text'))
+        self.assertNotIn('Checked in:', self.app.status_label.cget('text'))
+        self.pump(lambda: not self.app._checkin_busy)
+        for message, state in [('Checked in: An (S01)', 'checked_in'),
+                               ('Already checked in today: An (S01)', 'already_checked_in'),
+                               ('Check-in failed for S01: locked', 'error')]:
+            self.app._checkin_results.put((session, [message]))
+            self.app._poll_checkins()
+            self.assertEqual(self.app.status.state, state)
+            self.assertIn(message, self.app.status_label.cget('text'))
+        self.app.stop_attendance()
+        self.assertEqual(self.app.status.state, 'idle')
+
+    def test_unknown_is_red_and_no_faces_idle(self):
+        session = Mock()
+        session.check_in.return_value = []
+        self.app._attendance_session = session
+        for faces, expected in [([RecognizedFace((0,0,1,1), 'Unknown')], 'unknown'), ([], 'idle')]:
+            self.app._recognition_results.put((self.camera, time.monotonic(), self.app._recognition_session,
+                                               faces, 'Live recognition running'))
+            self.app._poll_recognition()
+            self.assertEqual(self.app.status.state, expected)
+            self.pump(lambda: not self.app._checkin_busy)

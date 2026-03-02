@@ -34,6 +34,7 @@ class GuiRegistrationTests(unittest.TestCase):
 
     def destroy_app(self):
         if self.app_exists():
+            self.app.status.cancel_timers()
             for callback in self.app.tk.call('after', 'info'):
                 self.app.after_cancel(callback)
             self.app.destroy()
@@ -76,21 +77,18 @@ class GuiRegistrationTests(unittest.TestCase):
             release.wait(3)
             return RegistrationResult(True, 'success', 'Saved S01')
 
-        with patch('gui.app.register_student', side_effect=backend) as backend_mock, patch(
-            'gui.app.extract_embedding'
-        ) as extract:
+        with patch('gui.app.register_student', side_effect=backend) as backend_mock:
             try:
                 self.app.register_student()
                 self.app.register_student()
-                self.app.extract_embedding()
                 self.assertTrue(self.app.register_button.instate(['disabled']))
-                self.assertTrue(self.app.extract_button.instate(['disabled']))
+                self.assertEqual(self.app.status.state, 'registering')
+                self.assertIsNotNone(self.app.status._blink_id)
                 ticks = []
                 self.app.after(10, lambda: ticks.append(True))
                 self.pump_until(lambda: bool(ticks) and bool(worker_threads))
                 self.assertNotEqual(worker_threads[0], main_thread)
                 self.assertEqual(backend_mock.call_count, 1)
-                extract.assert_not_called()
                 args = backend_mock.call_args.args
                 self.assertEqual(args[:2], ('S01','An'))
                 np.testing.assert_array_equal(args[2], self.frame)
@@ -98,7 +96,8 @@ class GuiRegistrationTests(unittest.TestCase):
                 release.set()
                 self.pump_until(lambda: not self.app._registration_busy)
         self.assertTrue(self.app.register_button.instate(['!disabled']))
-        self.assertTrue(self.app.extract_button.instate(['!disabled']))
+        self.assertIsNone(self.app.status._blink_id)
+        self.assertEqual(self.app.status.state, 'registered')
 
     def test_missing_inputs_and_inactive_camera(self):
         with patch('gui.app.register_student') as backend:
@@ -128,17 +127,16 @@ class GuiRegistrationTests(unittest.TestCase):
                     self.assertIn(message, self.app.status_label.cget('text'))
                     self.assertTrue(self.app.register_button.instate(['!disabled']))
 
-    def test_result_survives_preview_and_embedding_remains_available(self):
+    def test_registration_result_survives_preview(self):
+        self.assertFalse(hasattr(self.app, 'extract_button'))
+        from core.face_embedding import extract_embedding
+        self.assertTrue(callable(extract_embedding))
         with patch('gui.app.register_student', return_value=RegistrationResult(True,'success','Saved S01')):
             self.app.register_student()
             self.pump_until(lambda: not self.app._registration_busy)
         self.app.camera.messages.put(('frame', self.frame))
         self.app._update_preview()
         self.assertIn('Saved S01', self.app.status_label.cget('text'))
-        with patch('gui.app.extract_embedding', return_value=np.ones(128)):
-            self.app.extract_embedding()
-            self.pump_until(lambda: not self.app._embedding_busy)
-        self.assertIn('128 dimensions', self.app.status_label.cget('text'))
 
     def test_close_waits_for_registration_and_camera_cleanup(self):
         release = Event()
@@ -151,6 +149,8 @@ class GuiRegistrationTests(unittest.TestCase):
             try:
                 self.app.register_student()
                 self.app.close()
+                self.assertIsNone(self.app.status._blink_id)
+                self.assertIsNone(self.app.status._hold_id)
                 self.app.camera.stop.assert_called_once()
                 self.app.camera.messages.put(('stopped', None))
                 self.app._update_preview()

@@ -9,11 +9,11 @@ from PIL import Image, ImageTk
 
 from gui.camera import CameraCapture
 from gui.window_state import load_geometry, save_geometry
-from core.face_embedding import extract_embedding
 from core.registration import RegistrationResult, register_student
 from core.live_recognition import RECOGNITION_INTERVAL, recognize_frame
 from core.attendance import AttendanceSession
 from gui.attendance_history import AttendanceHistoryWindow
+from gui.status_indicator import StatusIndicator
 
 
 class AttendanceApp(tk.Tk):
@@ -28,9 +28,6 @@ class AttendanceApp(tk.Tk):
         self._preview_image = None
         self._stopping = False
         self._closing = False
-        self._embedding_results = Queue()
-        self._embedding_busy = False
-        self._embedding_status = None
         self._registration_results = Queue()
         self._registration_busy = False
         self._recognition_busy = False
@@ -79,11 +76,6 @@ class AttendanceApp(tk.Tk):
             state="disabled",
         )
         self.stop_camera_button.pack(side="left")
-        self.extract_button = ttk.Button(
-            camera_controls, text="Extract Embedding", command=self.extract_embedding
-        )
-        self.extract_button.pack(side="left", padx=(10, 0))
-
         preview_frame = ttk.Frame(camera_frame)
         preview_frame.pack(fill="both", expand=True)
         preview_frame.pack_propagate(False)
@@ -136,13 +128,9 @@ class AttendanceApp(tk.Tk):
             control_frame, text="Attendance History", command=self.open_attendance_history,
         ).pack(fill="x", pady=(15, 5))
 
-        # Status bar
-        self.status_label = ttk.Label(
-            self,
-            text="Status: Ready",
-            padding=10,
-        )
-        self.status_label.pack(side="bottom", fill="x")
+        self.status = StatusIndicator(self)
+        self.status.pack(side="bottom", fill="x")
+        self.status_label = self.status.label
 
     def open_attendance_history(self):
         if self._closing:
@@ -157,12 +145,12 @@ class AttendanceApp(tk.Tk):
         if self.camera is not None or self._closing:
             return
         self._stopping = False
-        self._embedding_status = None
         self._recognition_status = None
         self.camera = CameraCapture()
         self.start_camera_button.configure(state="disabled")
         self.stop_camera_button.configure(state="normal")
-        self.status_label.configure(text="Status: Opening camera...")
+        if not self._registration_busy:
+            self.status.set("idle", "Camera preview", force=True)
         self.camera.start()
         self.after(30, self._update_preview)
 
@@ -171,10 +159,10 @@ class AttendanceApp(tk.Tk):
             return
         self.stop_attendance()
         self._stopping = True
-        self._embedding_status = None
         self.camera.stop()
         self.stop_camera_button.configure(state="disabled")
-        self.status_label.configure(text="Status: Stopping camera...")
+        if not self._registration_busy and not self._closing:
+            self.status.set("idle", "Stopping camera...", force=True)
         self._clear_preview()
 
     def _clear_preview(self):
@@ -197,21 +185,16 @@ class AttendanceApp(tk.Tk):
                     return
                 self.start_camera_button.configure(state="normal")
                 self.stop_camera_button.configure(state="disabled")
-                self.status_label.configure(
-                    text=f"Status: {value}" if value else "Status: Camera stopped"
-                )
+                if not self._registration_busy:
+                    self.status.set("error" if value else "idle", value or "Camera stopped", force=True)
                 return
             if not self._stopping:
                 try:
                     image = Image.fromarray(cv2.cvtColor(value, cv2.COLOR_BGR2RGB))
                     image.thumbnail((max(1, self.camera_label.winfo_width()),
                                      max(1, self.camera_label.winfo_height())))
-                    self._preview_image = ImageTk.PhotoImage(image)
+                    self._preview_image = ImageTk.PhotoImage(image, master=self.camera_label)
                     self.camera_label.configure(image=self._preview_image, text="")
-                    self.status_label.configure(
-                        text=self._embedding_status or self._attendance_status
-                        or self._recognition_status or "Status: Camera running"
-                    )
                     self._maybe_recognize()
                 except (cv2.error, ValueError, tk.TclError):
                     self.stop_camera()
@@ -230,9 +213,9 @@ class AttendanceApp(tk.Tk):
         self.camera.enable_recognition(True)
         self.start_attendance_button.configure(state="disabled")
         self.stop_attendance_button.configure(state="normal")
-        self._embedding_status = None
         self._recognition_status = "Status: Attendance active; automatic check-in enabled"
-        self.status_label.configure(text=self._recognition_status)
+        if not self._registration_busy:
+            self.status.set("idle", "Attendance active", force=True)
 
     def stop_attendance(self):
         if self._attendance_session is not None:
@@ -244,13 +227,13 @@ class AttendanceApp(tk.Tk):
             self.camera.enable_recognition(False)
         self.start_attendance_button.configure(state="normal")
         self.stop_attendance_button.configure(state="disabled")
-        self._embedding_status = None
         self._recognition_status = None
-        self.status_label.configure(text="Status: Attendance recognition stopped; camera preview only")
+        if not self._registration_busy and not self._closing:
+            self.status.set("idle", "Attendance stopped; camera preview only", force=True)
 
     def _maybe_recognize(self):
         if (not self._attendance_active or self.camera is None
-                or self._recognition_busy or self._checkin_busy or self._registration_busy or self._embedding_busy
+                or self._recognition_busy or self._checkin_busy or self._registration_busy
                 or self._closing or self._stopping or monotonic() < self._next_recognition):
             return
         frame = self.camera.snapshot()
@@ -283,6 +266,20 @@ class AttendanceApp(tk.Tk):
                 and session == self._recognition_session):
             camera.set_recognition(results, captured_at)
             self._recognition_status = f"Status: {message}"
+            if not self._registration_busy:
+                known = [face.label for face in results if face.student_id]
+                unknown_count = sum(not face.student_id for face in results)
+                if unknown_count:
+                    text = f"Unknown face(s): {unknown_count}"
+                    if known:
+                        text += "; Recognized: " + ", ".join(known)
+                    self.status.set("unknown", text)
+                elif known:
+                    self.status.set("recognized", "Recognized: " + ", ".join(known))
+                elif "error" in message.lower() or "failed" in message.lower():
+                    self.status.set("error", message)
+                else:
+                    self.status.set("idle", message)
             self._checkin_busy = True
             Thread(target=self._check_in_background,
                    args=(self._attendance_session, results), daemon=True).start()
@@ -308,51 +305,17 @@ class AttendanceApp(tk.Tk):
             return
         if session is self._attendance_session and self._attendance_active and messages:
             self._attendance_status = "Status: " + "; ".join(messages)
-            if not self._embedding_busy and not self._registration_busy:
-                self._embedding_status = None
-                self.status_label.configure(text=self._attendance_status)
-
-    def extract_embedding(self):
-        if self._embedding_busy or self._registration_busy or self._closing:
-            return
-        frame = self.camera.snapshot() if self.camera and not self._stopping else None
-        if frame is None:
-            self._embedding_status = "Status: No camera frame available. Start the camera first."
-            self.status_label.configure(text=self._embedding_status)
-            return
-        self._embedding_busy = True
-        self.extract_button.configure(state="disabled")
-        self.register_button.configure(state="disabled")
-        self._embedding_status = "Status: Extracting embedding (first run may take longer)..."
-        self.status_label.configure(text=self._embedding_status)
-        Thread(target=self._extract_in_background, args=(frame, self.camera), daemon=True).start()
-        self.after(50, self._poll_embedding)
-
-    def _extract_in_background(self, frame, camera):
-        try:
-            embedding = extract_embedding(frame)
-            message = f"Status: FaceNet embedding extracted: {embedding.size} dimensions"
-        except Exception as exc:
-            message = f"Status: Embedding error: {exc}"
-        self._embedding_results.put((camera, message))
-
-    def _poll_embedding(self):
-        if self._closing:
-            return
-        try:
-            camera, message = self._embedding_results.get_nowait()
-        except Empty:
-            self.after(50, self._poll_embedding)
-            return
-        self._embedding_busy = False
-        self.extract_button.configure(state="normal")
-        self.register_button.configure(state="normal")
-        if camera is self.camera and not self._stopping:
-            self._embedding_status = message
-            self.status_label.configure(text=message)
+            if not self._registration_busy:
+                if any(message.startswith(("Check-in failed", "Attendance error")) for message in messages):
+                    state = "error"
+                elif any(message.startswith("Checked in:") for message in messages):
+                    state = "checked_in"
+                else:
+                    state = "already_checked_in"
+                self.status.set(state, "; ".join(messages), hold_ms=3000, force=True)
 
     def register_student(self):
-        if self._registration_busy or self._embedding_busy or self._closing:
+        if self._registration_busy or self._closing:
             return
         student_id = self.student_id_entry.get().strip()
         full_name = self.student_name_entry.get().strip()
@@ -368,17 +331,16 @@ class AttendanceApp(tk.Tk):
             return
         self._registration_busy = True
         self.register_button.configure(state="disabled")
-        self.extract_button.configure(state="disabled")
         self.student_id_entry.configure(state="disabled")
         self.student_name_entry.configure(state="disabled")
-        self._show_registration_status(f"Registering {student_id!r} (first run may take longer)...")
+        self._show_registration_status(f"Registering {student_id!r}...", state="registering")
         Thread(target=self._register_in_background,
                args=(student_id, full_name, frame), daemon=True).start()
         self.after(50, self._poll_registration)
 
-    def _show_registration_status(self, message):
-        self._embedding_status = f"Status: {message}"
-        self.status_label.configure(text=self._embedding_status)
+    def _show_registration_status(self, message, *, state="error"):
+        self.status.set(state, message, force=True,
+                        hold_ms=0 if state == "registering" else 3000)
 
     def _register_in_background(self, student_id, full_name, frame):
         try:
@@ -399,15 +361,15 @@ class AttendanceApp(tk.Tk):
                 self.destroy()
             return
         self.register_button.configure(state="normal")
-        self.extract_button.configure(state="normal")
         self.student_id_entry.configure(state="normal")
         self.student_name_entry.configure(state="normal")
-        self._show_registration_status(result.message)
+        self._show_registration_status(result.message, state="registered" if result.success else "error")
 
     def close(self):
         if not self._closing:
             save_geometry(self)
         self._closing = True
+        self.status.cancel_timers()
         self.stop_attendance()
         if self.camera is None and not self._registration_busy and not self._checkin_busy:
             self.destroy()
