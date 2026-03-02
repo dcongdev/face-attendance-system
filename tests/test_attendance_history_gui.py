@@ -12,6 +12,7 @@ import numpy as np
 
 from database.db import (
     ATTENDANCE_TIMEZONE, AttendanceRecord, DatabaseError, initialize_database, insert_student, record_attendance,
+    get_attendance_history, get_student,
 )
 from gui.app import AttendanceApp
 from gui.attendance_history import AttendanceHistoryWindow
@@ -130,9 +131,9 @@ class AttendanceHistoryGuiTests(unittest.TestCase):
     def test_newest_date_and_time_first_with_native_multiple_selection(self):
         window = self.open_window()
         records = [
-            AttendanceRecord('S01', 'An', '2026-10-15', '2026-10-15T05:00:00+00:00'),
-            AttendanceRecord('S02', 'Binh', '2026-10-16', '2026-10-16T01:00:00+00:00'),
-            AttendanceRecord('S03', 'Chi', '2026-10-16', '2026-10-16T05:00:00+00:00'),
+            AttendanceRecord('S01', 'An', '2026-10-15', '2026-10-15T05:00:00+00:00', 101),
+            AttendanceRecord('S02', 'Binh', '2026-10-16', '2026-10-16T01:00:00+00:00', 102),
+            AttendanceRecord('S03', 'Chi', '2026-10-16', '2026-10-16T05:00:00+00:00', 103),
         ]
         with patch('gui.attendance_history.get_attendance_history', return_value=records):
             window.filter_buttons['all'].invoke()
@@ -211,3 +212,91 @@ class AttendanceHistoryGuiTests(unittest.TestCase):
                 self.pump(lambda: not app._history_window._busy)
             finally:
                 app.destroy()
+
+    def test_delete_multiple_selected_uses_ids_after_reordering(self):
+        self.seed()
+        insert_student('S02', 'Binh', np.ones(128), self.path)
+        record_attendance('S02', self.path, now=self.now)
+        window = self.open_window()
+        window.filter_buttons['all'].invoke()
+        self.pump(lambda: not window._busy)
+        records = get_attendance_history(self.path)
+        ids = [r.record_id for r in records if r.student_id == 'S02' or r.attendance_date != self.now.date().isoformat()]
+        for record_id in ids:
+            window.table.move(str(record_id), '', 0)
+        window.table.selection_set(*map(str, ids))
+        with patch('gui.attendance_history.messagebox.askyesno', return_value=True) as confirm:
+            window.delete_buttons['selected'].invoke()
+            self.pump(lambda: not window._busy)
+        self.assertIn('2 attendance record(s)', confirm.call_args.args[1])
+        self.assertIn('selected', confirm.call_args.args[1])
+        self.assertEqual(len(self.rows()), 1)
+        self.assertEqual(window.count_label.cget('text'), 'Records: 1')
+        self.assertEqual(window.filter_mode.get(), 'all')
+        self.assertIsNotNone(get_student('S01', self.path))
+        self.assertIsNotNone(get_student('S02', self.path))
+
+    def test_clear_filtered_preserves_selected_date_and_other_dates(self):
+        self.seed()
+        window = self.open_window()
+        target = (self.now-timedelta(days=1)).date().isoformat()
+        window.selected_date.set(target)
+        window.filter_buttons['date'].invoke()
+        self.pump(lambda: not window._busy)
+        with patch('gui.attendance_history.messagebox.askyesno', return_value=True) as confirm:
+            window.delete_buttons['filtered'].invoke()
+            self.pump(lambda: not window._busy)
+        self.assertIn(target, confirm.call_args.args[1])
+        self.assertIn('1 attendance record(s)', confirm.call_args.args[1])
+        self.assertEqual(self.rows(), [])
+        self.assertEqual(window.selected_date.get(), target)
+        self.assertEqual(window.filter_mode.get(), 'date')
+        self.assertEqual(len(get_attendance_history(self.path)), 1)
+
+    def test_clear_all_requires_confirmation_and_preserves_later_checkins(self):
+        self.seed()
+        window = self.open_window()
+        with patch('gui.attendance_history.messagebox.askyesno', return_value=False) as confirm:
+            window.request_deletion('all')
+            self.pump(lambda: not window._busy)
+        self.assertIn('2 attendance record(s)', confirm.call_args.args[1])
+        self.assertIn('ENTIRE', confirm.call_args.args[1])
+        self.assertEqual(len(get_attendance_history(self.path)), 2)
+
+        def confirm_with_new_record(*args, **kwargs):
+            insert_student('S02', 'Binh', np.ones(128), self.path)
+            record_attendance('S02', self.path, now=self.now)
+            return True
+
+        with patch('gui.attendance_history.messagebox.askyesno', side_effect=confirm_with_new_record):
+            window.request_deletion('all')
+            self.pump(lambda: not window._busy)
+        self.assertEqual([r.student_id for r in get_attendance_history(self.path)], ['S02'])
+        self.assertEqual(window.filter_mode.get(), 'today')
+        self.assertEqual(window.count_label.cget('text'), 'Records: 1')
+        with patch('gui.attendance_history.messagebox.askyesno', return_value=True):
+            window.request_deletion('all')
+            self.pump(lambda: not window._busy)
+        self.assertEqual(get_attendance_history(self.path), [])
+
+    def test_empty_deletion_and_failures_leave_table_usable(self):
+        window = self.open_window()
+        with patch('gui.attendance_history.messagebox.askyesno') as confirm:
+            window.request_deletion('selected')
+            self.assertIn('Select one or more', window.status_label.cget('text'))
+            window.request_deletion('filtered')
+            self.pump(lambda: not window._busy)
+            confirm.assert_not_called()
+        insert_student('S01', 'An', np.ones(128), self.path)
+        record_attendance('S01', self.path, now=self.now)
+        window.refresh()
+        self.pump(lambda: not window._busy)
+        with patch('gui.attendance_history.messagebox.askyesno', return_value=True), patch(
+            'gui.attendance_history.delete_attendance_records', side_effect=DatabaseError('locked')
+        ):
+            window.request_deletion('all')
+            self.pump(lambda: not window._busy)
+        self.assertIn('locked', window.status_label.cget('text'))
+        self.assertEqual(len(self.rows()), 1)
+        self.assertTrue(window.refresh_button.instate(['!disabled']))
+        self.assertEqual(len(get_attendance_history(self.path)), 1)

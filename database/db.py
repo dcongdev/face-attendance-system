@@ -38,6 +38,7 @@ class AttendanceRecord:
     full_name: str
     attendance_date: str
     checked_in_at: str
+    record_id: int
 
 
 @contextmanager
@@ -62,6 +63,7 @@ def _connection(db_path, *, create=False):
 def initialize_database(db_path=DEFAULT_DB_PATH):
     """Create local storage and student/attendance tables, safely on repeated calls."""
     with _connection(db_path, create=True) as connection:
+        connection.execute("BEGIN IMMEDIATE")
         connection.execute("""
             CREATE TABLE IF NOT EXISTS students (
                 student_id TEXT PRIMARY KEY NOT NULL,
@@ -72,12 +74,30 @@ def initialize_database(db_path=DEFAULT_DB_PATH):
         """)
         connection.execute("""
             CREATE TABLE IF NOT EXISTS attendance (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
                 student_id TEXT NOT NULL REFERENCES students(student_id),
                 attendance_date TEXT NOT NULL,
                 checked_in_at TEXT NOT NULL,
-                PRIMARY KEY (student_id, attendance_date)
+                UNIQUE (student_id, attendance_date)
             )
         """)
+        if "id" not in {row["name"] for row in connection.execute("PRAGMA table_info(attendance)")}:
+            # Upgrade the original composite-key table transactionally, preserving all check-ins.
+            connection.execute("""
+                CREATE TABLE attendance_migration (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    student_id TEXT NOT NULL REFERENCES students(student_id),
+                    attendance_date TEXT NOT NULL,
+                    checked_in_at TEXT NOT NULL,
+                    UNIQUE (student_id, attendance_date)
+                )
+            """)
+            connection.execute("""
+                INSERT INTO attendance_migration (student_id, attendance_date, checked_in_at)
+                SELECT student_id, attendance_date, checked_in_at FROM attendance
+            """)
+            connection.execute("DROP TABLE attendance")
+            connection.execute("ALTER TABLE attendance_migration RENAME TO attendance")
 
 
 def _student_id(value):
@@ -215,8 +235,34 @@ def get_attendance_history(db_path=DEFAULT_DB_PATH):
     """Return attendance with student names, newest first; ties sort by student ID."""
     with _connection(db_path) as connection:
         rows = connection.execute("""
-            SELECT a.student_id, s.full_name, a.attendance_date, a.checked_in_at
+            SELECT a.id AS record_id, a.student_id, s.full_name, a.attendance_date, a.checked_in_at
             FROM attendance AS a JOIN students AS s ON s.student_id = a.student_id
             ORDER BY a.checked_in_at DESC, a.student_id ASC
         """).fetchall()
     return [AttendanceRecord(**dict(row)) for row in rows]
+
+
+def delete_attendance_records(record_ids, db_path=DEFAULT_DB_PATH):
+    """Delete only explicit stable attendance IDs; return the number removed.
+
+    Empty input is a no-op, absent IDs are ignored, and invalid IDs raise
+    ValueError before any write. Student profiles and embeddings are untouched.
+    """
+    try:
+        ids = list(record_ids)
+    except TypeError as exc:
+        raise ValueError("Record IDs must be a collection of positive integers.") from exc
+    if any(type(record_id) is not int or record_id <= 0 for record_id in ids):
+        raise ValueError("Record IDs must be positive integers.")
+    ids = sorted(set(ids))
+    if not ids:
+        return 0
+    with _connection(db_path) as connection:
+        deleted = 0
+        for start in range(0, len(ids), 500):
+            batch = ids[start:start + 500]
+            placeholders = ",".join("?" for _ in batch)
+            deleted += connection.execute(
+                f"DELETE FROM attendance WHERE id IN ({placeholders})", batch
+            ).rowcount
+        return deleted
