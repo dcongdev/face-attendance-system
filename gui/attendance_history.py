@@ -62,6 +62,7 @@ class AttendanceHistoryWindow(tk.Toplevel):
         self._busy = False
         self._closed = False
         self._poll_id = None
+        self._refresh_request_id = None
         self.filter_mode = tk.StringVar(self, value="today")
         self.selected_date = tk.StringVar(self, value=datetime.now(ATTENDANCE_TIMEZONE).date().isoformat())
         self._calendar_window = None
@@ -138,6 +139,18 @@ class AttendanceHistoryWindow(tk.Toplevel):
         except ValueError:
             selected = datetime.now(ATTENDANCE_TIMEZONE).date()
         self._calendar_window = DatePicker(self, selected, self._select_date)
+
+    def request_refresh(self):
+        """Refresh names after a profile edit, including when a history operation is busy."""
+        if self._closed:
+            return
+        if self._refresh_request_id is not None:
+            self.after_cancel(self._refresh_request_id)
+            self._refresh_request_id = None
+        if self._busy:
+            self._refresh_request_id = self.after(100, self.request_refresh)
+        else:
+            self.refresh()
 
     def _select_date(self, selected):
         self.selected_date.set(selected.isoformat())
@@ -274,6 +287,9 @@ class AttendanceHistoryWindow(tk.Toplevel):
 
     def destroy(self):
         self._closed = True
+        if self._refresh_request_id is not None:
+            self.after_cancel(self._refresh_request_id)
+            self._refresh_request_id = None
         if self._poll_id is not None:
             self.after_cancel(self._poll_id)
             self._poll_id = None

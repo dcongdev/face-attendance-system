@@ -21,7 +21,7 @@ class DuplicateStudentError(DatabaseError):
 
 
 class StudentNotFoundError(DatabaseError):
-    """Attendance requires an existing registered student."""
+    """The requested student is not registered."""
 
 
 @dataclass
@@ -29,6 +29,13 @@ class Student:
     student_id: str
     full_name: str
     embedding: np.ndarray
+    registered_at: str
+
+
+@dataclass(frozen=True)
+class StudentProfile:
+    student_id: str
+    full_name: str
     registered_at: str
 
 
@@ -172,6 +179,38 @@ def list_students(db_path=DEFAULT_DB_PATH):
     with _connection(db_path) as connection:
         rows = connection.execute("SELECT * FROM students ORDER BY student_id").fetchall()
     return [_restore(row) for row in rows]
+
+
+def search_students(query="", db_path=DEFAULT_DB_PATH):
+    """Return profile metadata matching a literal, Unicode case-insensitive ID/name substring.
+
+    Empty search returns all profiles by ID. Embeddings are not loaded for this view.
+    """
+    if not isinstance(query, str):
+        raise ValueError("Search must be a string.")
+    query = query.strip().casefold()
+    with _connection(db_path) as connection:
+        rows = connection.execute(
+            "SELECT student_id, full_name, registered_at FROM students ORDER BY student_id"
+        ).fetchall()
+    return [StudentProfile(**dict(row)) for row in rows
+            if query in row["student_id"].casefold() or query in row["full_name"].casefold()]
+
+
+def update_student_name(student_id, full_name, db_path=DEFAULT_DB_PATH):
+    """Update only the full name; ID, embedding and registration timestamp remain unchanged."""
+    student_id = _student_id(student_id)
+    if not isinstance(full_name, str) or not full_name.strip():
+        raise ValueError("Full name must be a nonempty string.")
+    with _connection(db_path) as connection:
+        cursor = connection.execute("UPDATE students SET full_name = ? WHERE student_id = ?",
+                                    (full_name.strip(), student_id))
+        if cursor.rowcount == 0:
+            raise StudentNotFoundError(f"Student ID {student_id!r} is not registered.")
+        row = connection.execute(
+            "SELECT student_id, full_name, registered_at FROM students WHERE student_id = ?", (student_id,)
+        ).fetchone()
+    return StudentProfile(**dict(row))
 
 
 def _attendance_time(now):

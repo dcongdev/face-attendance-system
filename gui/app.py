@@ -14,6 +14,7 @@ from core.live_recognition import RECOGNITION_INTERVAL, recognize_frame
 from core.attendance import AttendanceSession
 from gui.attendance_history import AttendanceHistoryWindow
 from gui.status_indicator import StatusIndicator
+from gui.student_management import StudentManagementWindow
 
 
 class AttendanceApp(tk.Tk):
@@ -41,6 +42,7 @@ class AttendanceApp(tk.Tk):
         self._checkin_results = Queue()
         self._attendance_status = None
         self._history_window = None
+        self._student_window = None
         self.create_widgets()
         self.protocol("WM_DELETE_WINDOW", self.close)
 
@@ -127,6 +129,9 @@ class AttendanceApp(tk.Tk):
         ttk.Button(
             control_frame, text="Attendance History", command=self.open_attendance_history,
         ).pack(fill="x", pady=(15, 5))
+        ttk.Button(
+            control_frame, text="Manage Students", command=self.open_student_management,
+        ).pack(fill="x", pady=5)
 
         self.status = StatusIndicator(self)
         self.status.pack(side="bottom", fill="x")
@@ -140,6 +145,28 @@ class AttendanceApp(tk.Tk):
         else:
             self._history_window.deiconify()
             self._history_window.lift()
+
+    def open_student_management(self):
+        if self._closing:
+            return
+        if self._student_window is None or not self._student_window.winfo_exists():
+            self._student_window = StudentManagementWindow(self, on_updated=self._student_profile_updated)
+        else:
+            self._student_window.deiconify()
+            self._student_window.lift()
+
+    def _student_profile_updated(self):
+        if self._closing:
+            return
+        if self._history_window is not None and self._history_window.winfo_exists():
+            self._history_window.request_refresh()
+        if self._attendance_active:
+            # Discard any recognition results that still contain the previous name.
+            self._recognition_session += 1
+            self._next_recognition = 0
+            self.camera.enable_recognition(True)
+            if not self._registration_busy:
+                self.status.set("idle", "Student name updated; refreshing recognition", force=True)
 
     def start_camera(self):
         if self.camera is not None or self._closing:
