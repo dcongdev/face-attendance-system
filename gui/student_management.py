@@ -3,6 +3,7 @@ from queue import Empty, Queue
 from threading import Thread
 import tkinter as tk
 from tkinter import ttk
+from core.student_profile import update_student_face
 
 from database.db import (
     ATTENDANCE_TIMEZONE, DEFAULT_DB_PATH, initialize_database, search_students, update_student_name,
@@ -28,16 +29,24 @@ def _save_profile(db_path, student_id, full_name, results):
         results.put(("save", None, f"Unable to save student: {exc}"))
 
 
-class StudentManagementWindow(tk.Toplevel):
-    """Search student profiles and edit names without loading biometric data."""
+def _update_face(db_path, student_id, frame, results):
+    try:
+        results.put(("face", update_student_face(student_id, frame, db_path), None))
+    except Exception as exc:
+        results.put(("face", None, f"Unable to update face: {exc}"))
 
-    def __init__(self, master, db_path=DEFAULT_DB_PATH, on_updated=None):
+
+class StudentManagementWindow(tk.Toplevel):
+    """Search profiles, edit names and replace face embeddings using webcam snapshots."""
+
+    def __init__(self, master, db_path=DEFAULT_DB_PATH, on_updated=None, capture_frame=None):
         super().__init__(master)
         self.title("Student Management")
         self.geometry("800x500")
         self.minsize(650, 380)
         self.db_path = db_path
         self.on_updated = on_updated
+        self.capture_frame = capture_frame
         self._results = Queue()
         self._busy = False
         self._closed = False
@@ -87,6 +96,10 @@ class StudentManagementWindow(tk.Toplevel):
         editor.columnconfigure(1, weight=1)
         self.save_button = ttk.Button(editor, text="Save Name", command=self.save_name)
         self.save_button.grid(row=1, column=2, padx=8)
+        self.update_face_button = ttk.Button(editor, text="Update Face", command=self.update_face)
+        self.update_face_button.grid(row=0, column=2, padx=8)
+        ttk.Label(editor, text="Update Face uses the latest webcam frame. Keep exactly one face in view.",
+                  wraplength=580).grid(row=2, column=0, columnspan=3, sticky="w", pady=(6, 0))
         self.count_label = ttk.Label(content, text="Students: 0")
         self.count_label.pack(anchor="w")
         self.status_label = ttk.Label(content, wraplength=730)
@@ -101,6 +114,7 @@ class StudentManagementWindow(tk.Toplevel):
         editing = "normal" if not self._busy and self._selected_id else "disabled"
         self.name_entry.configure(state=editing)
         self.save_button.configure(state=editing)
+        self.update_face_button.configure(state=editing)
 
     def _on_selection(self, event=None):
         if self._busy or self._closed:
@@ -144,6 +158,25 @@ class StudentManagementWindow(tk.Toplevel):
                args=(self.db_path, self._selected_id, name, self._results), daemon=True).start()
         self._poll_id = self.after(50, self._poll)
 
+    def update_face(self):
+        if self._busy or self._closed:
+            return
+        if self._selected_id is None:
+            self.status_label.configure(text="Select a student first.")
+            return
+        try:
+            frame = self.capture_frame() if self.capture_frame else None
+            if frame is None:
+                raise ValueError("No camera frame available. Start the camera in the main window first.")
+        except Exception as exc:
+            self.status_label.configure(text=f"Unable to capture face: {exc}")
+            return
+        self._busy = True
+        self._update_controls()
+        self.status_label.configure(text=f"Updating face for {self._selected_id}; processing may take a moment...")
+        Thread(target=_update_face, args=(self.db_path, self._selected_id, frame, self._results), daemon=True).start()
+        self._poll_id = self.after(50, self._poll)
+
     def _poll(self):
         self._poll_id = None
         if self._closed:
@@ -158,9 +191,10 @@ class StudentManagementWindow(tk.Toplevel):
             self._update_controls()
             self.status_label.configure(text=error)
             return
-        if action == "save":
+        if action in ("save", "face"):
             self._restore_id = value.student_id
-            self._feedback = f"Saved name for {value.student_id}. "
+            self._feedback = (f"Updated face for {value.student_id}. " if action == "face"
+                              else f"Saved name for {value.student_id}. ")
             if self.on_updated:
                 self.on_updated()
             self.refresh()
@@ -187,3 +221,4 @@ class StudentManagementWindow(tk.Toplevel):
         super().destroy()
         self.query = self.student_id = self.full_name = None
         self.on_updated = None
+        self.capture_frame = None

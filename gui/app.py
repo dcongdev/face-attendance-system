@@ -150,10 +150,22 @@ class AttendanceApp(tk.Tk):
         if self._closing:
             return
         if self._student_window is None or not self._student_window.winfo_exists():
-            self._student_window = StudentManagementWindow(self, on_updated=self._student_profile_updated)
+            self._student_window = StudentManagementWindow(
+                self, on_updated=self._student_profile_updated, capture_frame=self._capture_student_face,
+            )
         else:
             self._student_window.deiconify()
             self._student_window.lift()
+
+    def _capture_student_face(self):
+        if self._closing or self._stopping or self.camera is None:
+            raise ValueError("Start the camera in the main window first.")
+        if self._registration_busy:
+            raise ValueError("Wait for student registration to finish before updating a face.")
+        frame = self.camera.snapshot()
+        if frame is None:
+            raise ValueError("No camera frame available yet. Wait for the live preview and try again.")
+        return frame
 
     def _student_profile_updated(self):
         if self._closing:
@@ -161,12 +173,12 @@ class AttendanceApp(tk.Tk):
         if self._history_window is not None and self._history_window.winfo_exists():
             self._history_window.request_refresh()
         if self._attendance_active:
-            # Discard any recognition results that still contain the previous name.
+            # Discard recognition results computed before a profile or embedding update.
             self._recognition_session += 1
             self._next_recognition = 0
             self.camera.enable_recognition(True)
             if not self._registration_busy:
-                self.status.set("idle", "Student name updated; refreshing recognition", force=True)
+                self.status.set("idle", "Student profile updated; refreshing recognition", force=True)
 
     def start_camera(self):
         if self.camera is not None or self._closing:

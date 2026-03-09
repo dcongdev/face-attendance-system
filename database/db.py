@@ -213,6 +213,25 @@ def update_student_name(student_id, full_name, db_path=DEFAULT_DB_PATH):
     return StudentProfile(**dict(row))
 
 
+def update_student_embedding(student_id, embedding, db_path=DEFAULT_DB_PATH):
+    """Atomically replace only a student's validated FaceNet embedding.
+
+    Failed validation or storage leaves the original embedding intact. Return
+    profile metadata; IDs, names, timestamps and attendance are never changed.
+    """
+    student_id = _student_id(student_id)
+    encoded = json.dumps(_embedding(embedding).tolist(), allow_nan=False)
+    with _connection(db_path) as connection:
+        cursor = connection.execute("UPDATE students SET embedding = ? WHERE student_id = ?",
+                                    (encoded, student_id))
+        if cursor.rowcount == 0:
+            raise StudentNotFoundError(f"Student ID {student_id!r} is not registered.")
+        row = connection.execute(
+            "SELECT student_id, full_name, registered_at FROM students WHERE student_id = ?", (student_id,)
+        ).fetchone()
+    return StudentProfile(**dict(row))
+
+
 def _attendance_time(now):
     if now is None:
         now = datetime.now(timezone.utc)

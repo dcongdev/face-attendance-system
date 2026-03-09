@@ -131,7 +131,7 @@ class StudentManagementGuiTests(unittest.TestCase):
         insert_student('S01','Old Name',np.ones(128),self.path)
         record_attendance('S01',self.path,now=datetime.now(timezone.utc))
         with patch('gui.app.load_geometry',return_value='1000x650'), patch(
-            'gui.app.StudentManagementWindow',side_effect=lambda master, on_updated: StudentManagementWindow(master,self.path,on_updated)
+            'gui.app.StudentManagementWindow',side_effect=lambda master, on_updated, capture_frame: StudentManagementWindow(master,self.path,on_updated,capture_frame)
         ) as factory:
             app=AttendanceApp()
             app.withdraw()
@@ -155,5 +155,92 @@ class StudentManagementGuiTests(unittest.TestCase):
                 self.assertEqual(app._history_window.table.item(item,'values')[1], 'New Name')
                 self.assertGreater(app._recognition_session,previous_session)
                 app.camera.enable_recognition.assert_called_with(True)
+            finally:
+                app.destroy()
+
+    def test_update_face_uses_snapshot_and_not_unsaved_name(self):
+        changed=Mock()
+        window=self.open(on_updated=changed)
+        self.select()
+        frame=np.zeros((160,160,3),dtype=np.uint8)
+        window.capture_frame=Mock(return_value=frame)
+        window.full_name.set('Unsaved name')
+        with patch('core.student_profile.extract_embedding',return_value=-np.ones(128,dtype=np.float32)):
+            window.update_face_button.invoke()
+            self.pump(lambda: not window._busy)
+        window.capture_frame.assert_called_once()
+        changed.assert_called_once()
+        self.assertIn('Updated face',window.status_label.cget('text'))
+        self.assertEqual(get_student('S01',self.path).full_name,'Nguyễn An')
+        np.testing.assert_array_equal(get_student('S01',self.path).embedding,-np.ones(128,dtype=np.float32))
+
+    def test_update_face_requires_selection_camera_and_one_face(self):
+        window=self.open()
+        window.update_face()
+        self.assertIn('Select a student',window.status_label.cget('text'))
+        self.select()
+        window.update_face()
+        self.assertIn('Start the camera',window.status_label.cget('text'))
+        window.capture_frame=Mock(return_value=np.zeros((160,160,3),dtype=np.uint8))
+        for error in (ValueError('No face detected'),ValueError('Multiple faces detected'),DatabaseError('locked')):
+            with patch('gui.student_management.update_student_face',side_effect=error):
+                window.update_face()
+                self.pump(lambda: not window._busy)
+            self.assertIn(str(error),window.status_label.cget('text'))
+            self.assertTrue(window.update_face_button.instate(['!disabled']))
+            np.testing.assert_array_equal(get_student('S01',self.path).embedding,np.ones(128))
+
+    def test_face_processing_is_background_and_submissions_are_single(self):
+        window=self.open()
+        self.select()
+        window.capture_frame=Mock(return_value=np.zeros((160,160,3),dtype=np.uint8))
+        release=Event()
+
+        def process(*args):
+            release.wait(3)
+            raise ValueError('No face detected')
+
+        with patch('gui.student_management.update_student_face',side_effect=process) as update:
+            try:
+                window.update_face()
+                window.update_face()
+                self.assertTrue(window.update_face_button.instate(['disabled']))
+                ticks=[]
+                self.root.after(10,lambda: ticks.append(True))
+                self.pump(lambda: bool(ticks) and update.called)
+                self.assertEqual(update.call_count,1)
+            finally:
+                release.set()
+                self.pump(lambda: not window._busy)
+
+    def test_main_camera_snapshot_and_face_update_invalidate_old_recognition(self):
+        initialize_database(self.path)
+        insert_student('S01','An',np.ones(128),self.path)
+        with patch('gui.app.load_geometry',return_value='1000x650'), patch(
+            'gui.app.StudentManagementWindow',side_effect=lambda master, on_updated, capture_frame:
+                StudentManagementWindow(master,self.path,on_updated,capture_frame)
+        ):
+            app=AttendanceApp()
+            app.withdraw()
+            try:
+                with self.assertRaises(ValueError):
+                    app._capture_student_face()
+                app.camera=Mock()
+                frame=np.zeros((160,160,3),dtype=np.uint8)
+                app.camera.snapshot.return_value=frame
+                app._attendance_active=True
+                generation=app._recognition_session
+                app.open_student_management()
+                manager=app._student_window
+                self.pump(lambda: not manager._busy)
+                manager.table.selection_set('S01')
+                manager._on_selection()
+                with patch('core.student_profile.extract_embedding',return_value=-np.ones(128,dtype=np.float32)):
+                    manager.update_face_button.invoke()
+                    self.pump(lambda: not manager._busy)
+                app.camera.snapshot.assert_called_once()
+                self.assertGreater(app._recognition_session,generation)
+                app.camera.enable_recognition.assert_called_with(True)
+                self.assertIn('Updated face',manager.status_label.cget('text'))
             finally:
                 app.destroy()
