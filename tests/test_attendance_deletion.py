@@ -97,8 +97,8 @@ class AttendanceDeletionTests(unittest.TestCase):
     def test_large_batch_is_atomic(self):
         with closing(sqlite3.connect(self.path)) as connection:
             with connection:
-                connection.executemany('INSERT INTO attendance (student_id,attendance_date,checked_in_at) VALUES (?,?,?)',
-                                       [('S01', (self.now-timedelta(days=10+i)).date().isoformat(), self.now.isoformat()) for i in range(501)])
+                connection.executemany('INSERT INTO attendance (student_id,full_name,student_ref,attendance_date,checked_in_at) VALUES (?,?,?,?,?)',
+                                       [('S01', 'An', 'S01', (self.now-timedelta(days=10+i)).date().isoformat(), self.now.isoformat()) for i in range(501)])
                 last_id = connection.execute('SELECT MAX(id) FROM attendance').fetchone()[0]
                 connection.execute(f'''CREATE TRIGGER block_last BEFORE DELETE ON attendance WHEN OLD.id = {last_id}
                                        BEGIN SELECT RAISE(ABORT, 'blocked'); END''')

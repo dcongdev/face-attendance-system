@@ -89,11 +89,11 @@ class AttendanceDatabaseTests(unittest.TestCase):
         with closing(sqlite3.connect(self.path)) as connection:
             connection.execute('PRAGMA foreign_keys = ON')
             with self.assertRaises(sqlite3.IntegrityError):
-                connection.execute('INSERT INTO attendance (student_id, attendance_date, checked_in_at) VALUES (?, ?, ?)',
-                                   ('S01','2026-10-16',self.now.isoformat()))
+                connection.execute('INSERT INTO attendance (student_id, full_name, student_ref, attendance_date, checked_in_at) VALUES (?, ?, ?, ?, ?)',
+                                   ('S01','An','S01','2026-10-16',self.now.isoformat()))
             with self.assertRaises(sqlite3.IntegrityError):
-                connection.execute('INSERT INTO attendance (student_id, attendance_date, checked_in_at) VALUES (?, ?, ?)',
-                                   ('missing','2026-10-16',self.now.isoformat()))
+                connection.execute('INSERT INTO attendance (student_id, full_name, student_ref, attendance_date, checked_in_at) VALUES (?, ?, ?, ?, ?)',
+                                   ('missing','Missing','missing','2026-10-16',self.now.isoformat()))
 
     def test_concurrent_checkins_insert_once(self):
         with ThreadPoolExecutor(max_workers=2) as executor:

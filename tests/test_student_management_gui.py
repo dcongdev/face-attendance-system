@@ -244,3 +244,70 @@ class StudentManagementGuiTests(unittest.TestCase):
                 self.assertIn('Updated face',manager.status_label.cget('text'))
             finally:
                 app.destroy()
+
+    def test_delete_student_confirmation_cancel_and_history_preservation(self):
+        changed=Mock()
+        window=self.open(on_updated=changed)
+        record_attendance('S01',self.path,now=datetime.now(timezone.utc))
+        window.delete_selected_student()
+        self.assertIn('Select a student',window.status_label.cget('text'))
+        self.select()
+        window.full_name.set('Unsaved name')
+        with patch('gui.student_management.messagebox.askyesno',return_value=False) as confirm:
+            window.delete_selected_student()
+        self.assertIn('S01',confirm.call_args.args[1])
+        self.assertIn('Nguyễn An',confirm.call_args.args[1])
+        self.assertNotIn('Unsaved name',confirm.call_args.args[1])
+        self.assertIsNotNone(get_student('S01',self.path))
+        changed.assert_not_called()
+        with patch('gui.student_management.messagebox.askyesno',return_value=True):
+            window.delete_button.invoke()
+            self.pump(lambda: not window._busy)
+        changed.assert_called_once()
+        self.assertIsNone(get_student('S01',self.path))
+        self.assertEqual(window.count_label.cget('text'),'Students: 0')
+        self.assertIn('attendance history preserved',window.status_label.cget('text'))
+        from database.db import get_attendance_history
+        self.assertEqual(get_attendance_history(self.path)[0].full_name,'Nguyễn An')
+
+    def test_student_deletion_errors_restore_controls(self):
+        window=self.open()
+        self.select()
+        with patch('gui.student_management.messagebox.askyesno',return_value=True), patch(
+            'gui.student_management.delete_student',side_effect=DatabaseError('locked')
+        ):
+            window.delete_selected_student()
+            self.pump(lambda: not window._busy)
+        self.assertIn('locked',window.status_label.cget('text'))
+        self.assertTrue(window.delete_button.instate(['!disabled']))
+        self.assertIsNotNone(get_student('S01',self.path))
+
+    def test_student_deletion_invalidates_recognition_without_changing_modes(self):
+        initialize_database(self.path)
+        insert_student('S01','An',np.ones(128),self.path)
+        with patch('gui.app.load_geometry',return_value='1000x650'), patch(
+            'gui.app.StudentManagementWindow',side_effect=lambda master,on_updated,capture_frame:
+                StudentManagementWindow(master,self.path,on_updated,capture_frame)
+        ), patch('gui.student_management.messagebox.askyesno',return_value=True):
+            app=AttendanceApp()
+            app.withdraw()
+            try:
+                app.camera=Mock()
+                app._attendance_active=True
+                session=app._attendance_session
+                generation=app._recognition_session
+                app.open_student_management()
+                manager=app._student_window
+                self.pump(lambda: not manager._busy)
+                manager.table.selection_set('S01')
+                manager._on_selection()
+                manager.delete_button.invoke()
+                self.pump(lambda: not manager._busy)
+                self.assertGreater(app._recognition_session,generation)
+                self.assertTrue(app._attendance_active)
+                self.assertIs(app._attendance_session,session)
+                app.camera.stop.assert_not_called()
+                app.camera.enable_recognition.assert_called_with(True)
+                self.assertEqual(manager.table.get_children(),())
+            finally:
+                app.destroy()

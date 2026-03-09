@@ -79,32 +79,49 @@ def initialize_database(db_path=DEFAULT_DB_PATH):
                 registered_at TEXT NOT NULL
             )
         """)
-        connection.execute("""
-            CREATE TABLE IF NOT EXISTS attendance (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                student_id TEXT NOT NULL REFERENCES students(student_id),
-                attendance_date TEXT NOT NULL,
-                checked_in_at TEXT NOT NULL,
-                UNIQUE (student_id, attendance_date)
-            )
-        """)
-        if "id" not in {row["name"] for row in connection.execute("PRAGMA table_info(attendance)")}:
-            # Upgrade the original composite-key table transactionally, preserving all check-ins.
-            connection.execute("""
-                CREATE TABLE attendance_migration (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    student_id TEXT NOT NULL REFERENCES students(student_id),
-                    attendance_date TEXT NOT NULL,
-                    checked_in_at TEXT NOT NULL,
-                    UNIQUE (student_id, attendance_date)
-                )
-            """)
-            connection.execute("""
-                INSERT INTO attendance_migration (student_id, attendance_date, checked_in_at)
-                SELECT student_id, attendance_date, checked_in_at FROM attendance
-            """)
-            connection.execute("DROP TABLE attendance")
-            connection.execute("ALTER TABLE attendance_migration RENAME TO attendance")
+        _initialize_attendance(connection)
+
+
+def _create_attendance_table(connection, table):
+    # Table names are internal constants, never user input.
+    connection.execute(f"""
+        CREATE TABLE {table} (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            student_id TEXT NOT NULL,
+            full_name TEXT NOT NULL,
+            student_ref TEXT REFERENCES students(student_id) ON DELETE SET NULL,
+            attendance_date TEXT NOT NULL,
+            checked_in_at TEXT NOT NULL,
+            UNIQUE (student_id, attendance_date)
+        )
+    """)
+
+
+def _initialize_attendance(connection):
+    columns = {row["name"] for row in connection.execute("PRAGMA table_info(attendance)")}
+    if not columns:
+        _create_attendance_table(connection, "attendance")
+        return
+    if {"id", "full_name", "student_ref"} <= columns:
+        return
+    # Upgrade both previous schemas in the caller's transaction, retaining IDs
+    # and the AUTOINCREMENT high-water mark used by confirmed attendance deletion.
+    sequence = 0
+    if connection.execute("SELECT 1 FROM sqlite_master WHERE name = 'sqlite_sequence'").fetchone():
+        row = connection.execute("SELECT seq FROM sqlite_sequence WHERE name = 'attendance'").fetchone()
+        sequence = row["seq"] if row else 0
+    _create_attendance_table(connection, "attendance_migration")
+    id_expression = "a.id" if "id" in columns else "NULL"
+    name_expression = "COALESCE(s.full_name, a.full_name)" if "full_name" in columns else "COALESCE(s.full_name, 'Unknown')"
+    connection.execute(f"""
+        INSERT INTO attendance_migration (id, student_id, full_name, student_ref, attendance_date, checked_in_at)
+        SELECT {id_expression}, a.student_id, {name_expression}, s.student_id, a.attendance_date, a.checked_in_at
+        FROM attendance AS a LEFT JOIN students AS s ON s.student_id = a.student_id
+    """)
+    connection.execute("DROP TABLE attendance")
+    connection.execute("ALTER TABLE attendance_migration RENAME TO attendance")
+    if sequence:
+        connection.execute("UPDATE sqlite_sequence SET seq = MAX(seq, ?) WHERE name = 'attendance'", (sequence,))
 
 
 def _student_id(value):
@@ -232,6 +249,27 @@ def update_student_embedding(student_id, embedding, db_path=DEFAULT_DB_PATH):
     return StudentProfile(**dict(row))
 
 
+def delete_student(student_id, db_path=DEFAULT_DB_PATH):
+    """Delete a profile/embedding and preserve its attendance ID/name snapshots.
+
+    Return deleted metadata; raise StudentNotFoundError for an absent profile.
+    Profile removal and history preservation commit or roll back together.
+    """
+    student_id = _student_id(student_id)
+    with _connection(db_path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute(
+            "SELECT student_id, full_name, registered_at FROM students WHERE student_id = ?", (student_id,)
+        ).fetchone()
+        if row is None:
+            raise StudentNotFoundError(f"Student ID {student_id!r} is not registered.")
+        # Freeze the latest saved name before the FK clears the active-profile link.
+        connection.execute("UPDATE attendance SET full_name = ? WHERE student_ref = ?",
+                           (row["full_name"], student_id))
+        connection.execute("DELETE FROM students WHERE student_id = ?", (student_id,))
+    return StudentProfile(**dict(row))
+
+
 def _attendance_time(now):
     if now is None:
         now = datetime.now(timezone.utc)
@@ -267,10 +305,10 @@ def record_attendance(student_id, db_path=DEFAULT_DB_PATH, *, now=None, cancel_e
             return None
         _require_student(connection, student_id)
         cursor = connection.execute("""
-            INSERT INTO attendance (student_id, attendance_date, checked_in_at)
-            VALUES (?, ?, ?)
+            INSERT INTO attendance (student_id, full_name, student_ref, attendance_date, checked_in_at)
+            SELECT student_id, full_name, student_id, ?, ? FROM students WHERE student_id = ?
             ON CONFLICT(student_id, attendance_date) DO NOTHING
-        """, (student_id, attendance_date, checked_in_at))
+        """, (attendance_date, checked_in_at, student_id))
         if cancel_event is not None and cancel_event.is_set():
             connection.rollback()
             return None
@@ -293,8 +331,8 @@ def get_attendance_history(db_path=DEFAULT_DB_PATH):
     """Return attendance with student names, newest first; ties sort by student ID."""
     with _connection(db_path) as connection:
         rows = connection.execute("""
-            SELECT a.id AS record_id, a.student_id, s.full_name, a.attendance_date, a.checked_in_at
-            FROM attendance AS a JOIN students AS s ON s.student_id = a.student_id
+            SELECT a.id AS record_id, a.student_id, COALESCE(s.full_name, a.full_name) AS full_name, a.attendance_date, a.checked_in_at
+            FROM attendance AS a LEFT JOIN students AS s ON s.student_id = a.student_ref
             ORDER BY a.checked_in_at DESC, a.student_id ASC
         """).fetchall()
     return [AttendanceRecord(**dict(row)) for row in rows]

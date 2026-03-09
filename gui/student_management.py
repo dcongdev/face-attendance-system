@@ -2,11 +2,12 @@ from datetime import datetime
 from queue import Empty, Queue
 from threading import Thread
 import tkinter as tk
-from tkinter import ttk
+from tkinter import messagebox, ttk
 from core.student_profile import update_student_face
 
 from database.db import (
     ATTENDANCE_TIMEZONE, DEFAULT_DB_PATH, initialize_database, search_students, update_student_name,
+    delete_student,
 )
 
 
@@ -34,6 +35,13 @@ def _update_face(db_path, student_id, frame, results):
         results.put(("face", update_student_face(student_id, frame, db_path), None))
     except Exception as exc:
         results.put(("face", None, f"Unable to update face: {exc}"))
+
+
+def _delete_profile(db_path, student_id, results):
+    try:
+        results.put(("delete", delete_student(student_id, db_path), None))
+    except Exception as exc:
+        results.put(("delete", None, f"Unable to delete student: {exc}"))
 
 
 class StudentManagementWindow(tk.Toplevel):
@@ -98,6 +106,8 @@ class StudentManagementWindow(tk.Toplevel):
         self.save_button.grid(row=1, column=2, padx=8)
         self.update_face_button = ttk.Button(editor, text="Update Face", command=self.update_face)
         self.update_face_button.grid(row=0, column=2, padx=8)
+        self.delete_button = ttk.Button(editor, text="Delete Student", command=self.delete_selected_student)
+        self.delete_button.grid(row=3, column=2, padx=8, pady=(8, 0))
         ttk.Label(editor, text="Update Face uses the latest webcam frame. Keep exactly one face in view.",
                   wraplength=580).grid(row=2, column=0, columnspan=3, sticky="w", pady=(6, 0))
         self.count_label = ttk.Label(content, text="Students: 0")
@@ -115,6 +125,7 @@ class StudentManagementWindow(tk.Toplevel):
         self.name_entry.configure(state=editing)
         self.save_button.configure(state=editing)
         self.update_face_button.configure(state=editing)
+        self.delete_button.configure(state=editing)
 
     def _on_selection(self, event=None):
         if self._busy or self._closed:
@@ -177,6 +188,34 @@ class StudentManagementWindow(tk.Toplevel):
         Thread(target=_update_face, args=(self.db_path, self._selected_id, frame, self._results), daemon=True).start()
         self._poll_id = self.after(50, self._poll)
 
+    def delete_selected_student(self):
+        if self._busy or self._closed:
+            return
+        if self._selected_id is None:
+            self.status_label.configure(text="Select a student first.")
+            return
+        student_id = self._selected_id
+        saved_name = self.table.item(student_id, "values")[1]
+        self._busy = True
+        self._update_controls()
+        confirmed = messagebox.askyesno(
+            "Delete Student",
+            f"Delete this student profile and face embedding?\n\n"
+            f"Student ID: {student_id}\nFull Name: {saved_name}\n\n"
+            "Existing attendance history, including the student's ID and name, will be preserved.",
+            parent=self, default="no",
+        )
+        if self._closed:
+            return
+        if not confirmed:
+            self._busy = False
+            self._update_controls()
+            self.status_label.configure(text="Student deletion cancelled.")
+            return
+        self.status_label.configure(text=f"Deleting student {student_id}...")
+        Thread(target=_delete_profile, args=(self.db_path, student_id, self._results), daemon=True).start()
+        self._poll_id = self.after(50, self._poll)
+
     def _poll(self):
         self._poll_id = None
         if self._closed:
@@ -191,10 +230,13 @@ class StudentManagementWindow(tk.Toplevel):
             self._update_controls()
             self.status_label.configure(text=error)
             return
-        if action in ("save", "face"):
-            self._restore_id = value.student_id
-            self._feedback = (f"Updated face for {value.student_id}. " if action == "face"
-                              else f"Saved name for {value.student_id}. ")
+        if action in ("save", "face", "delete"):
+            self._restore_id = None if action == "delete" else value.student_id
+            self._feedback = (
+                f"Deleted student {value.student_id}; attendance history preserved. " if action == "delete"
+                else f"Updated face for {value.student_id}. " if action == "face"
+                else f"Saved name for {value.student_id}. "
+            )
             if self.on_updated:
                 self.on_updated()
             self.refresh()
