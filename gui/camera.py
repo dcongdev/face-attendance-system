@@ -20,7 +20,7 @@ class CameraCapture:
         self._frame_lock = Lock()
         self._latest_frame = None
         self._recognition = (0, [])
-        self._recognition_enabled = False
+        self._recognition_enabled = True
         self._thread = Thread(target=self._run, daemon=True)
 
     def start(self):
@@ -28,6 +28,7 @@ class CameraCapture:
 
     def stop(self):
         self._stop.set()
+        self.enable_recognition(False)
 
     def snapshot(self):
         """Copy the latest unannotated frame for background processing."""

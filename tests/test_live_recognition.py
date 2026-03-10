@@ -131,7 +131,7 @@ class LiveRecognitionGuiTests(unittest.TestCase):
 
     def test_stopped_or_replaced_camera_does_not_receive_old_results(self):
         self.app._recognition_busy = True
-        self.app._recognition_results.put((self.camera, time.monotonic(), self.app._recognition_session, [], 'Old result'))
+        self.app._recognition_results.put((self.camera, time.monotonic(), self.app._recognition_session, [], 'Old result', self.app._attendance_session))
         self.app.camera = Mock()
         self.app._poll_recognition()
         self.camera.set_recognition.assert_not_called()
@@ -145,22 +145,37 @@ class LiveRecognitionGuiTests(unittest.TestCase):
         self.assertIs(self.app.camera, self.camera)
         self.camera.set_recognition.assert_called_once()
 
-    def test_camera_only_mode_never_schedules_recognition(self):
+    def test_camera_recognizes_without_attendance_and_never_logs(self):
+        old_logging = Mock()
+        self.app._attendance_session = old_logging
         self.app.stop_attendance()
-        with patch('gui.app.recognize_frame') as recognize_mock:
+        face = RecognizedFace((0,0,10,10), 'An (S01)', 'S01')
+        with patch('gui.app.recognize_frame', return_value=([face], 'Live recognition running')) as recognize_mock:
             self.app._maybe_recognize()
-            recognize_mock.assert_not_called()
+            self.pump(lambda: not self.app._recognition_busy)
+            recognize_mock.assert_called_once()
+        self.camera.set_recognition.assert_called_once()
+        old_logging.check_in.assert_not_called()
+        self.assertEqual(self.app.status.state, 'recognized')
+        self.assertIn('logging off', self.app.status_label.cget('text'))
         self.camera.stop.assert_not_called()
-        self.camera.enable_recognition.assert_called_with(False)
+        self.camera.enable_recognition.assert_not_called()
 
-    def test_stop_restart_discards_inflight_results(self):
-        session = self.app._recognition_session
+    def test_stop_restart_keeps_recognition_but_rejects_old_logging_session(self):
+        generation = self.app._recognition_session
+        old_logging = Mock()
+        self.app._attendance_session = old_logging
         self.app._recognition_busy = True
         self.app.stop_attendance()
         self.app.start_attendance()
-        self.app._recognition_results.put((self.camera, time.monotonic(), session, [], 'Old result'))
+        current_logging = Mock()
+        self.app._attendance_session = current_logging
+        self.app._recognition_results.put((self.camera, time.monotonic(), generation,
+                                           [], 'Old result', old_logging))
         self.app._poll_recognition()
-        self.camera.set_recognition.assert_not_called()
+        self.camera.set_recognition.assert_called_once()
+        old_logging.check_in.assert_not_called()
+        current_logging.check_in.assert_not_called()
         self.assertTrue(self.app._attendance_active)
         self.camera.stop.assert_not_called()
 
@@ -182,7 +197,7 @@ class LiveRecognitionGuiTests(unittest.TestCase):
         session.check_in.side_effect = check_in
         faces = [RecognizedFace((0,0,10,10), 'An (S01)', 'S01')]
         self.app._recognition_results.put((self.camera, time.monotonic(), self.app._recognition_session,
-                                           faces, 'Live recognition running'))
+                                           faces, 'Live recognition running', self.app._attendance_session))
         try:
             self.app._poll_recognition()
             ticks = []
@@ -194,7 +209,7 @@ class LiveRecognitionGuiTests(unittest.TestCase):
             self.pump(lambda: not self.app._checkin_busy)
         self.assertIn('Checked in: An (S01)', self.app.status_label.cget('text'))
         self.app._recognition_results.put((self.camera, time.monotonic(), self.app._recognition_session,
-                                           [], 'Live recognition running'))
+                                           [], 'Live recognition running', self.app._attendance_session))
         session.check_in.side_effect = None
         session.check_in.return_value = []
         self.app._poll_recognition()
@@ -207,7 +222,7 @@ class LiveRecognitionGuiTests(unittest.TestCase):
         generation = self.app._recognition_session
         self.app.stop_attendance()
         self.app._recognition_results.put((self.camera, time.monotonic(), generation,
-                                           [RecognizedFace((0,0,1,1), 'An', 'S01')], 'Recognized'))
+                                           [RecognizedFace((0,0,1,1), 'An', 'S01')], 'Recognized', session))
         self.app._poll_recognition()
         session.stop.assert_called_once()
         session.check_in.assert_not_called()
@@ -228,7 +243,7 @@ class LiveRecognitionGuiTests(unittest.TestCase):
         self.app._attendance_session = session
         face = RecognizedFace((0,0,10,10), 'An (S01)', 'S01')
         self.app._recognition_results.put((self.camera, time.monotonic(), self.app._recognition_session,
-                                           [face], 'Live recognition running'))
+                                           [face], 'Live recognition running', self.app._attendance_session))
         self.app._poll_recognition()
         self.assertEqual(self.app.status.state, 'recognized')
         self.assertIn('Recognized:', self.app.status_label.cget('text'))
@@ -250,7 +265,79 @@ class LiveRecognitionGuiTests(unittest.TestCase):
         self.app._attendance_session = session
         for faces, expected in [([RecognizedFace((0,0,1,1), 'Unknown')], 'unknown'), ([], 'idle')]:
             self.app._recognition_results.put((self.camera, time.monotonic(), self.app._recognition_session,
-                                               faces, 'Live recognition running'))
+                                               faces, 'Live recognition running', self.app._attendance_session))
             self.app._poll_recognition()
             self.assertEqual(self.app.status.state, expected)
             self.pump(lambda: not self.app._checkin_busy)
+
+    def test_start_camera_enables_recognition_but_not_logging(self):
+        self.app.stop_attendance()
+        self.app.camera = None
+        with patch('gui.app.CameraCapture', return_value=self.camera):
+            self.app.start_camera()
+        self.camera.enable_recognition.assert_called_once_with(True)
+        self.camera.start.assert_called_once()
+        self.assertFalse(self.app._attendance_active)
+
+    def test_camera_result_captured_before_start_attendance_cannot_log(self):
+        self.app.stop_attendance()
+        generation = self.app._recognition_session
+        self.app.start_attendance()
+        logging = Mock()
+        self.app._attendance_session = logging
+        self.app._recognition_results.put((self.camera, time.monotonic(), generation,
+                                           [RecognizedFace((0,0,10,10),'An (S01)','S01')], 'Recognized', None))
+        self.app._poll_recognition()
+        self.camera.set_recognition.assert_called_once()
+        logging.check_in.assert_not_called()
+
+    def test_stop_during_inference_updates_recognition_without_checkin(self):
+        release = Event()
+        logging = Mock()
+        self.app._attendance_session = logging
+
+        def recognize(frame):
+            release.wait(3)
+            return [RecognizedFace((0,0,10,10),'An (S01)','S01')], 'Recognized'
+
+        with patch('gui.app.recognize_frame', side_effect=recognize):
+            try:
+                self.app._maybe_recognize()
+                self.app.stop_attendance()
+            finally:
+                release.set()
+                self.pump(lambda: not self.app._recognition_busy)
+        logging.stop.assert_called_once()
+        logging.check_in.assert_not_called()
+        self.camera.set_recognition.assert_called_once()
+        self.assertEqual(self.app.status.state, 'recognized')
+
+    def test_recognition_continues_while_database_checkin_is_busy(self):
+        logging = Mock()
+        self.app._attendance_session = logging
+        self.app._checkin_busy = True
+        with patch('gui.app.recognize_frame',return_value=([], 'Live recognition running')) as recognize_mock:
+            self.app._maybe_recognize()
+            self.pump(lambda: not self.app._recognition_busy)
+        recognize_mock.assert_called_once()
+        logging.check_in.assert_not_called()
+
+    def test_profile_changes_refresh_recognition_with_logging_disabled(self):
+        self.app.stop_attendance()
+        generation = self.app._recognition_session
+        self.app._student_profile_updated()
+        self.assertGreater(self.app._recognition_session, generation)
+        self.camera.enable_recognition.assert_called_once_with(True)
+        self.assertFalse(self.app._attendance_active)
+
+    def test_stopping_camera_discards_pending_recognition_and_logging(self):
+        logging = Mock()
+        self.app._attendance_session = logging
+        generation = self.app._recognition_session
+        self.app.stop_camera()
+        self.app._recognition_results.put((self.camera, time.monotonic(), generation,
+                                           [RecognizedFace((0,0,10,10),'An (S01)','S01')], 'Recognized', logging))
+        self.app._poll_recognition()
+        self.camera.set_recognition.assert_not_called()
+        logging.check_in.assert_not_called()
+        self.assertFalse(self.app._attendance_active)
